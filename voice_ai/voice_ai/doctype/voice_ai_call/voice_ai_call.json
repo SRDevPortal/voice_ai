@@ -1,0 +1,152 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "hash",
+ "creation": "2026-04-16 17:45:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "call_queue",
+  "encounter_queue",
+  "patient_encounter",
+  "voice_worker",
+  "attempt_no",
+  "to_number",
+  "call_status",
+  "session_id",
+  "elevenlabs_conversation_id",
+  "job_id",
+  "duration",
+  "hangup_cause",
+  "summary",
+  "business_outcome",
+  "request_payload",
+  "response_payload"
+ ],
+ "fields": [
+  {
+   "fieldname": "call_queue",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Call Queue",
+   "options": "Call Queue"
+  },
+  {
+   "fieldname": "encounter_queue",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Encounter Queue",
+   "options": "Voice AI Encounter Queue"
+  },
+  {
+   "fieldname": "patient_encounter",
+   "fieldtype": "Link",
+   "label": "Patient Encounter",
+   "options": "Patient Encounter"
+  },
+  {
+   "fieldname": "voice_worker",
+   "fieldtype": "Link",
+   "label": "Voice Worker",
+   "options": "Voice AI Worker"
+  },
+  {
+   "default": "0",
+   "fieldname": "attempt_no",
+   "fieldtype": "Int",
+   "label": "Attempt No"
+  },
+  {
+   "fieldname": "to_number",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "To Number"
+  },
+  {
+   "default": "queued",
+   "fieldname": "call_status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Call Status",
+   "options": "queued\ndialing\nringing\nin_progress\ncompleted\nbusy\nno_answer\ntimeout\ncancel\nfailed\nretry_scheduled"
+  },
+  {
+   "fieldname": "session_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Session ID"
+  },
+  {
+   "fieldname": "elevenlabs_conversation_id",
+   "fieldtype": "Data",
+   "label": "ElevenLabs Conversation ID"
+  },
+  {
+   "fieldname": "job_id",
+   "fieldtype": "Data",
+   "label": "Job ID"
+  },
+  {
+   "fieldname": "duration",
+   "fieldtype": "Int",
+   "label": "Duration"
+  },
+  {
+   "fieldname": "hangup_cause",
+   "fieldtype": "Data",
+   "label": "Hangup Cause"
+  },
+  {
+   "fieldname": "summary",
+   "fieldtype": "Long Text",
+   "label": "Summary"
+  },
+  {
+   "fieldname": "business_outcome",
+   "fieldtype": "Data",
+   "label": "Business Outcome"
+  },
+  {
+   "fieldname": "request_payload",
+   "fieldtype": "Long Text",
+   "label": "Request Payload"
+  },
+  {
+   "fieldname": "response_payload",
+   "fieldtype": "Long Text",
+   "label": "Response Payload"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "istable": 0,
+ "links": [],
+ "modified": "2026-04-16 17:45:00.000000",
+ "modified_by": "Administrator",
+ "module": "Voice AI",
+ "name": "Voice AI Call",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

@@ -1,0 +1,146 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "naming_series:",
+ "creation": "2026-04-16 17:45:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "queue_name",
+  "enabled",
+  "auto_assign_workers",
+  "status",
+  "priority",
+  "description",
+  "default_agent_id",
+  "default_phone_number_id",
+  "max_concurrent_items",
+  "assignment_mode",
+  "retry_policy",
+  "allowed_calling_from",
+  "allowed_calling_till"
+ ],
+ "fields": [
+  {
+   "default": "CQ-.#####",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Queue ID",
+   "options": "CQ-.#####\nQUEUE-.#####",
+   "reqd": 1
+  },
+  {
+   "fieldname": "queue_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Queue Name",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "default": "1",
+   "fieldname": "auto_assign_workers",
+   "fieldtype": "Check",
+   "label": "Auto Assign Workers"
+  },
+  {
+   "default": "Open",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Open\nPaused\nClosed"
+  },
+  {
+   "default": "100",
+   "fieldname": "priority",
+   "fieldtype": "Int",
+   "label": "Priority"
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  },
+  {
+   "fieldname": "default_agent_id",
+   "fieldtype": "Data",
+   "label": "Default Agent ID"
+  },
+  {
+   "fieldname": "default_phone_number_id",
+   "fieldtype": "Data",
+   "label": "Default Phone Number ID"
+  },
+  {
+   "default": "5",
+   "fieldname": "max_concurrent_items",
+   "fieldtype": "Int",
+   "label": "Max Concurrent Items"
+  },
+  {
+   "default": "Least Load",
+   "fieldname": "assignment_mode",
+   "fieldtype": "Select",
+   "label": "Assignment Mode",
+   "options": "Least Load\nRound Robin"
+  },
+  {
+   "fieldname": "retry_policy",
+   "fieldtype": "Link",
+   "label": "Retry Policy",
+   "options": "Voice AI Retry Policy"
+  },
+  {
+   "fieldname": "allowed_calling_from",
+   "fieldtype": "Time",
+   "label": "Allowed Calling From"
+  },
+  {
+   "fieldname": "allowed_calling_till",
+   "fieldtype": "Time",
+   "label": "Allowed Calling Till"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "istable": 0,
+ "links": [],
+ "modified": "2026-04-16 17:45:00.000000",
+ "modified_by": "Administrator",
+ "module": "Voice AI",
+ "name": "Call Queue",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

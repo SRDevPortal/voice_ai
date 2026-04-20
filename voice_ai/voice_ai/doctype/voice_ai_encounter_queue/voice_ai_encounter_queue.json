@@ -1,0 +1,311 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "hash",
+ "creation": "2026-04-16 17:45:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "call_queue",
+  "call_queue_id",
+  "patient_encounter",
+  "queue_status",
+  "telephony_status",
+  "business_outcome",
+  "priority",
+  "assigned_worker",
+  "assigned_agent",
+  "retry_policy",
+  "source_system",
+  "external_queue_id",
+  "patient",
+  "patient_name",
+  "customer",
+  "customer_name",
+  "customer_phone",
+  "order_id",
+  "session_id",
+  "attempt_no",
+  "max_attempts",
+  "retry_count",
+  "next_retry_at",
+  "created_at",
+  "assigned_at",
+  "picked_at",
+  "started_at",
+  "submitted_at",
+  "ended_at",
+  "last_status_at",
+  "last_status_change_source",
+  "job_id",
+  "elevenlabs_conversation_id",
+  "summary",
+  "transcript",
+  "payload_json",
+  "notes"
+ ],
+ "fields": [
+  {
+   "fieldname": "call_queue",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Call Queue",
+   "options": "Call Queue",
+   "reqd": 1
+  },
+  {
+   "fieldname": "call_queue_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Call Queue ID",
+   "fetch_from": "call_queue.name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "patient_encounter",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Patient Encounter",
+   "options": "Patient Encounter",
+   "reqd": 1
+  },
+  {
+   "default": "Pending",
+   "fieldname": "queue_status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Queue Status",
+   "options": "Pending\nAssigned\nPicked\nIn Progress\nSubmitted\nRetry Scheduled\nCompleted\nFailed\nEscalated\nClosed"
+  },
+  {
+   "default": "queued",
+   "fieldname": "telephony_status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Telephony Status",
+   "options": "queued\ndialing\nringing\nin_progress\ncompleted\nbusy\nno_answer\ntimeout\ncancel\nfailed\nretry_scheduled"
+  },
+  {
+   "fieldname": "business_outcome",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Business Outcome",
+   "options": "\nconfirmed\ncancelled_by_customer\ncallback_requested\nwrong_number\nneeds_human\nunclear\nnot_reached\ndo_not_call\nmax_attempts_reached"
+  },
+  {
+   "default": "Medium",
+   "fieldname": "priority",
+   "fieldtype": "Select",
+   "label": "Priority",
+   "options": "Low\nMedium\nHigh\nUrgent"
+  },
+  {
+   "fieldname": "assigned_worker",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Assigned Worker",
+   "options": "Voice AI Worker"
+  },
+  {
+   "fieldname": "assigned_agent",
+   "fieldtype": "Data",
+   "label": "Assigned Agent"
+  },
+  {
+   "fieldname": "retry_policy",
+   "fieldtype": "Link",
+   "label": "Retry Policy",
+   "options": "Voice AI Retry Policy"
+  },
+  {
+   "default": "n8n",
+   "fieldname": "source_system",
+   "fieldtype": "Data",
+   "label": "Source System"
+  },
+  {
+   "fieldname": "external_queue_id",
+   "fieldtype": "Data",
+   "in_standard_filter": 1,
+   "label": "External Queue ID"
+  },
+  {
+   "fieldname": "patient",
+   "fieldtype": "Link",
+   "label": "Patient",
+   "options": "Patient"
+  },
+  {
+   "fieldname": "patient_name",
+   "fieldtype": "Data",
+   "label": "Patient Name"
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer"
+  },
+  {
+   "fieldname": "customer_name",
+   "fieldtype": "Data",
+   "label": "Customer Name"
+  },
+  {
+   "fieldname": "customer_phone",
+   "fieldtype": "Data",
+   "label": "Customer Phone"
+  },
+  {
+   "fieldname": "order_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Order ID"
+  },
+  {
+   "fieldname": "session_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Session ID",
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "attempt_no",
+   "fieldtype": "Int",
+   "label": "Attempt No"
+  },
+  {
+   "default": "0",
+   "fieldname": "max_attempts",
+   "fieldtype": "Int",
+   "label": "Max Attempts"
+  },
+  {
+   "default": "0",
+   "fieldname": "retry_count",
+   "fieldtype": "Int",
+   "label": "Retry Count"
+  },
+  {
+   "fieldname": "next_retry_at",
+   "fieldtype": "Datetime",
+   "label": "Next Retry At"
+  },
+  {
+   "fieldname": "created_at",
+   "fieldtype": "Datetime",
+   "label": "Created At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "assigned_at",
+   "fieldtype": "Datetime",
+   "label": "Assigned At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "picked_at",
+   "fieldtype": "Datetime",
+   "label": "Picked At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "started_at",
+   "fieldtype": "Datetime",
+   "label": "Started At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "submitted_at",
+   "fieldtype": "Datetime",
+   "label": "Submitted At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "ended_at",
+   "fieldtype": "Datetime",
+   "label": "Ended At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_status_at",
+   "fieldtype": "Datetime",
+   "label": "Last Status At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_status_change_source",
+   "fieldtype": "Data",
+   "label": "Last Status Change Source",
+   "read_only": 1
+  },
+  {
+   "fieldname": "job_id",
+   "fieldtype": "Data",
+   "in_standard_filter": 1,
+   "label": "Job ID"
+  },
+  {
+   "fieldname": "elevenlabs_conversation_id",
+   "fieldtype": "Data",
+   "in_standard_filter": 1,
+   "label": "ElevenLabs Conversation ID"
+  },
+  {
+   "fieldname": "summary",
+   "fieldtype": "Long Text",
+   "label": "Summary"
+  },
+  {
+   "fieldname": "transcript",
+   "fieldtype": "Long Text",
+   "label": "Transcript"
+  },
+  {
+   "fieldname": "payload_json",
+   "fieldtype": "Long Text",
+   "label": "Payload JSON"
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Notes"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "istable": 0,
+ "links": [],
+ "modified": "2026-04-16 17:45:00.000000",
+ "modified_by": "Administrator",
+ "module": "Voice AI",
+ "name": "Voice AI Encounter Queue",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
