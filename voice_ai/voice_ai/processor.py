@@ -161,6 +161,44 @@ def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: in
 		return exc.code, parsed
 
 
+def format_address(address_doc) -> str:
+	parts = [
+		address_doc.get("address_line1"),
+		address_doc.get("address_line2"),
+		address_doc.get("city"),
+		address_doc.get("state"),
+		address_doc.get("pincode"),
+		address_doc.get("country"),
+	]
+	return ", ".join(str(part).strip() for part in parts if str(part or "").strip())
+
+
+def get_linked_address(doctype: str, name: str | None) -> str:
+	if not name:
+		return ""
+
+	if doctype == "Customer":
+		customer_address = frappe.db.get_value("Customer", name, "customer_primary_address")
+		if customer_address and frappe.db.exists("Address", customer_address):
+			return format_address(frappe.get_doc("Address", customer_address))
+
+	links = frappe.get_all(
+		"Dynamic Link",
+		filters={"parenttype": "Address", "link_doctype": doctype, "link_name": name},
+		fields=["parent"],
+		order_by="modified desc",
+		limit=20,
+	)
+	for link in links:
+		if frappe.db.get_value("Address", link.parent, "is_primary_address"):
+			return format_address(frappe.get_doc("Address", link.parent))
+
+	if links:
+		return format_address(frappe.get_doc("Address", links[0].parent))
+
+	return ""
+
+
 def _finalize_submission_failure(
 	queue_doc,
 	reason: str,
@@ -232,6 +270,7 @@ def build_encounter_order_context(queue_doc) -> dict:
 			"order_items": "",
 			"payment_status": "",
 			"outstanding_amount": 0.0,
+			"address": "",
 		}
 
 	encounter_doc = frappe.get_doc("Patient Encounter", queue_doc.patient_encounter)
@@ -260,11 +299,15 @@ def build_encounter_order_context(queue_doc) -> dict:
 		f"{item.get('item_name') or item.get('item_code') or 'Item'} x {item['qty']:g} @ {item['rate']:g} = {item['amount']:g}"
 		for item in order_items
 	)
+	address = get_linked_address("Patient", encounter_doc.get("patient")) or get_linked_address(
+		"Customer", queue_doc.customer or encounter_doc.get("customer")
+	)
 
 	return {
 		"order_items": order_items_text,
 		"payment_status": encounter_doc.get("payment_status") or "",
 		"outstanding_amount": max(flt(order_total - paid_total), 0.0),
+		"address": address,
 	}
 
 
@@ -284,6 +327,8 @@ def build_dynamic_variables(queue_doc) -> dict:
 		"order_items": encounter_context["order_items"],
 		"payment_status": encounter_context["payment_status"],
 		"outstanding_amount": encounter_context["outstanding_amount"],
+		"amount": encounter_context["outstanding_amount"],
+		"address": encounter_context["address"],
 		"source_system": queue_doc.source_system or "",
 	}
 
