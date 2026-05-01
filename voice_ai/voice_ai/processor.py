@@ -4,6 +4,7 @@ import json
 import socket
 from datetime import time
 from urllib import error, request
+from urllib.parse import quote, urlencode
 
 import frappe
 from frappe.utils import add_to_date, cint, flt, get_datetime, get_time, now_datetime
@@ -161,6 +162,80 @@ def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: in
 		return exc.code, parsed
 
 
+def _get_json(url: str, headers: dict | None = None, timeout: int = 30):
+	req = request.Request(url, headers=headers or {}, method="GET")
+	try:
+		with request.urlopen(req, timeout=timeout) as response:
+			body = response.read().decode("utf-8")
+			return response.status, json.loads(body) if body else {}
+	except error.HTTPError as exc:
+		body = exc.read().decode("utf-8") if exc.fp else ""
+		try:
+			parsed = json.loads(body) if body else {}
+		except Exception:
+			parsed = {"raw": body}
+		return exc.code, parsed
+
+
+def _log_remote_error(message: str, details: dict | None = None):
+	payload = {"message": message, **(details or {})}
+	frappe.log_error(json.dumps(payload, default=str, indent=2), "Voice AI Remote Frappe Fetch Failed")
+
+
+def _remote_base_url(remote_site_url: str | None) -> str:
+	return (remote_site_url or "").strip().rstrip("/")
+
+
+def get_remote_headers(api_key: str | None, api_secret: str | None) -> dict:
+	return {
+		"Accept": "application/json",
+		"Authorization": f"token {(api_key or '').strip()}:{(api_secret or '').strip()}",
+		"User-Agent": "Mozilla/5.0 VoiceAI-Frappe-Integration/1.0",
+	}
+
+
+def remote_get(remote_site_url: str, api_key: str, api_secret: str, doctype: str, name: str, timeout: int = 30) -> dict:
+	url = f"{_remote_base_url(remote_site_url)}/api/resource/{quote(doctype)}/{quote(name)}"
+	status_code, response = _get_json(url, headers=get_remote_headers(api_key, api_secret), timeout=timeout)
+	if status_code >= 400:
+		_log_remote_error(
+			f"Remote GET failed for {doctype} {name}",
+			{"url": url, "status_code": status_code, "response": response},
+		)
+		raise frappe.ValidationError(f"Remote Frappe fetch failed for {doctype} {name} with status {status_code}")
+	return response.get("data") if isinstance(response, dict) else {}
+
+
+def remote_get_list(
+	remote_site_url: str,
+	api_key: str,
+	api_secret: str,
+	doctype: str,
+	filters: dict,
+	fields: list[str],
+	order_by: str | None = None,
+	limit_page_length: int | None = None,
+	timeout: int = 30,
+) -> list[dict]:
+	params = {
+		"filters": json.dumps(filters),
+		"fields": json.dumps(fields),
+	}
+	if order_by:
+		params["order_by"] = order_by
+	if limit_page_length:
+		params["limit_page_length"] = str(limit_page_length)
+	url = f"{_remote_base_url(remote_site_url)}/api/resource/{quote(doctype)}?{urlencode(params)}"
+	status_code, response = _get_json(url, headers=get_remote_headers(api_key, api_secret), timeout=timeout)
+	if status_code >= 400:
+		_log_remote_error(
+			f"Remote list fetch failed for {doctype}",
+			{"url": url, "filters": filters, "status_code": status_code, "response": response},
+		)
+		raise frappe.ValidationError(f"Remote Frappe list fetch failed for {doctype} with status {status_code}")
+	return response.get("data") if isinstance(response, dict) else []
+
+
 def format_address(address_doc) -> str:
 	parts = [
 		address_doc.get("address_line1"),
@@ -197,6 +272,165 @@ def get_linked_address(doctype: str, name: str | None) -> str:
 		return format_address(frappe.get_doc("Address", links[0].parent))
 
 	return ""
+
+
+def get_remote_linked_address(remote_config: dict, doctype: str, name: str | None) -> str:
+	if not name:
+		return ""
+
+	if doctype == "Customer":
+		customer_doc = remote_get(
+			remote_config["remote_site_url"],
+			remote_config["api_key"],
+			remote_config["api_secret"],
+			"Customer",
+			name,
+		)
+		customer_address = customer_doc.get("customer_primary_address")
+		if customer_address:
+			address_doc = remote_get(
+				remote_config["remote_site_url"],
+				remote_config["api_key"],
+				remote_config["api_secret"],
+				"Address",
+				customer_address,
+			)
+			return format_address(address_doc)
+
+	links = remote_get_list(
+		remote_config["remote_site_url"],
+		remote_config["api_key"],
+		remote_config["api_secret"],
+		"Dynamic Link",
+		{"parenttype": "Address", "link_doctype": doctype, "link_name": name},
+		["parent"],
+		order_by="modified desc",
+		limit_page_length=20,
+	)
+	for link in links:
+		address_doc = remote_get(
+			remote_config["remote_site_url"],
+			remote_config["api_key"],
+			remote_config["api_secret"],
+			"Address",
+			link.get("parent"),
+		)
+		if address_doc.get("is_primary_address"):
+			return format_address(address_doc)
+
+	if links:
+		address_doc = remote_get(
+			remote_config["remote_site_url"],
+			remote_config["api_key"],
+			remote_config["api_secret"],
+			"Address",
+			links[0].get("parent"),
+		)
+		return format_address(address_doc)
+
+	return ""
+
+
+def get_remote_patient_context(remote_config: dict, encounter_doc: dict) -> dict:
+	patient = encounter_doc.get("patient")
+	patient_mobile = encounter_doc.get("sr_pe_mobile")
+	customer = encounter_doc.get("customer")
+
+	if patient:
+		patient_doc = remote_get(
+			remote_config["remote_site_url"],
+			remote_config["api_key"],
+			remote_config["api_secret"],
+			"Patient",
+			patient,
+		)
+		patient_mobile = patient_mobile or patient_doc.get("mobile")
+		customer = customer or patient_doc.get("customer")
+
+	return {
+		"patient": patient,
+		"patient_name": encounter_doc.get("patient_name"),
+		"customer": customer,
+		"customer_name": encounter_doc.get("patient_name"),
+		"customer_phone": normalize_phone_number(patient_mobile),
+	}
+
+
+def safe_get_remote_linked_address(remote_config: dict, doctype: str, name: str | None) -> str:
+	try:
+		return get_remote_linked_address(remote_config, doctype, name)
+	except Exception as exc:
+		_log_remote_error(
+			f"Remote address fetch failed for {doctype} {name}",
+			{"doctype": doctype, "name": name, "error": str(exc), "traceback": frappe.get_traceback()},
+		)
+		return ""
+
+
+def build_remote_encounter_context(queue_doc, remote_config: dict) -> dict:
+	patient_encounter = queue_doc.patient_encounter
+	if not patient_encounter:
+		raise frappe.ValidationError(f"Encounter Queue {queue_doc.name} has no patient encounter reference")
+
+	encounter_doc = remote_get(
+		remote_config["remote_site_url"],
+		remote_config["api_key"],
+		remote_config["api_secret"],
+		"Patient Encounter",
+		patient_encounter,
+	)
+	patient_context = get_remote_patient_context(remote_config, encounter_doc)
+
+	order_items = []
+	order_total = 0.0
+	for row in encounter_doc.get("sr_pe_order_items") or []:
+		qty = flt(row.get("sr_item_qty") or 0)
+		rate = flt(row.get("sr_item_rate") or 0)
+		amount = flt(qty * rate)
+		order_total += amount
+		order_items.append(
+			{
+				"item_code": row.get("sr_item_code"),
+				"item_name": row.get("sr_item_name"),
+				"qty": qty,
+				"rate": rate,
+				"amount": amount,
+			}
+		)
+
+	paid_total = 0.0
+	for row in encounter_doc.get("enc_multi_payments") or []:
+		paid_total += flt(row.get("mmp_paid_amount") or 0)
+
+	order_items_text = ", ".join(
+		f"{item.get('item_name') or item.get('item_code') or 'Item'} x {item['qty']:g} @ {item['rate']:g} = {item['amount']:g}"
+		for item in order_items
+	)
+	patient = patient_context.get("patient") or encounter_doc.get("patient")
+	customer = patient_context.get("customer") or encounter_doc.get("customer")
+	address = safe_get_remote_linked_address(remote_config, "Patient", patient) or safe_get_remote_linked_address(
+		remote_config, "Customer", customer
+	)
+	outstanding_amount = max(flt(order_total - paid_total), 0.0)
+
+	return {
+		"queue_name": queue_doc.call_queue,
+		"queue_item": queue_doc.name,
+		"session_id": queue_doc.session_id,
+		"patient_encounter": patient_encounter,
+		"patient": patient or "",
+		"patient_name": patient_context.get("patient_name") or "",
+		"customer": customer or "",
+		"customer_name": patient_context.get("customer_name") or "",
+		"customer_phone": normalize_phone_number(queue_doc.customer_phone or patient_context.get("customer_phone")),
+		"order_id": queue_doc.order_id or "",
+		"order_items": order_items_text,
+		"payment_status": encounter_doc.get("payment_status") or "",
+		"outstanding_amount": outstanding_amount,
+		"amount": outstanding_amount,
+		"address": address,
+		"source_system": queue_doc.source_system or "",
+	}
 
 
 def _finalize_submission_failure(
@@ -311,7 +545,10 @@ def build_encounter_order_context(queue_doc) -> dict:
 	}
 
 
-def build_dynamic_variables(queue_doc) -> dict:
+def build_dynamic_variables(queue_doc, remote_context: dict | None = None) -> dict:
+	if remote_context:
+		return remote_context
+
 	encounter_context = build_encounter_order_context(queue_doc)
 	return {
 		"queue_name": queue_doc.call_queue,
@@ -333,10 +570,12 @@ def build_dynamic_variables(queue_doc) -> dict:
 	}
 
 
-def build_elevenlabs_payload(queue_doc, queue_settings: dict) -> dict:
+def build_elevenlabs_payload(queue_doc, queue_settings: dict, remote_context: dict | None = None) -> dict:
 	agent_id = queue_settings.get("default_agent_id")
 	phone_number_id = queue_settings.get("default_phone_number_id")
-	to_number = normalize_phone_number(queue_doc.customer_phone)
+	to_number = normalize_phone_number(
+		(remote_context or {}).get("customer_phone") if remote_context else queue_doc.customer_phone
+	)
 
 	if not agent_id:
 		raise frappe.ValidationError(f"Call Queue {queue_doc.call_queue} is missing Default Agent ID")
@@ -350,7 +589,7 @@ def build_elevenlabs_payload(queue_doc, queue_settings: dict) -> dict:
 		"agent_phone_number_id": phone_number_id,
 		"to_number": to_number,
 		"conversation_initiation_client_data": {
-			"dynamic_variables": build_dynamic_variables(queue_doc),
+			"dynamic_variables": build_dynamic_variables(queue_doc, remote_context=remote_context),
 			"source_info": {"source": "sip_trunk", "version": "voice_ai"},
 		},
 	}
@@ -425,6 +664,34 @@ def should_retry(queue_doc, policy: dict | None = None) -> bool:
 	return status == "timeout"
 
 
+def get_call_queue_remote_config(call_queue: str) -> dict:
+	call_queue_doc = frappe.get_doc(CALL_QUEUE_DOCTYPE, call_queue)
+	return {
+		"remote_access": bool(cint(call_queue_doc.get("remote_access") or 0)),
+		"remote_site_url": call_queue_doc.get("remote_site_url"),
+		"api_key": call_queue_doc.get_password("api_key") if call_queue_doc.get("api_key") else None,
+		"api_secret": call_queue_doc.get_password("api_secret") if call_queue_doc.get("api_secret") else None,
+	}
+
+
+def validate_remote_config(remote_config: dict, call_queue: str):
+	if not remote_config.get("remote_access"):
+		return
+	missing = [
+		label
+		for label, fieldname in (
+			("Remote Site URL", "remote_site_url"),
+			("API Key", "api_key"),
+			("API Secret", "api_secret"),
+		)
+		if not remote_config.get(fieldname)
+	]
+	if missing:
+		message = f"Call Queue {call_queue} has Remote Access enabled but is missing: {', '.join(missing)}"
+		_log_remote_error(message, {"call_queue": call_queue, "missing": missing})
+		raise frappe.ValidationError(message)
+
+
 def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 	queue_doc = frappe.get_doc(QUEUE_DOCTYPE, queue_name)
 	queue_settings = frappe.db.get_value(
@@ -438,6 +705,7 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 		],
 		as_dict=True,
 	) or {}
+	remote_config = get_call_queue_remote_config(queue_doc.call_queue)
 	api_key = get_elevenlabs_api_key()
 	if not api_key:
 		raise frappe.ValidationError(
@@ -455,7 +723,26 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 	queue_doc.last_status_change_source = "Queue Processor"
 	queue_doc.queue_status = "Picked"
 
-	payload = build_elevenlabs_payload(queue_doc, queue_settings)
+	remote_context = None
+	try:
+		validate_remote_config(remote_config, queue_doc.call_queue)
+		if remote_config.get("remote_access"):
+			remote_context = build_remote_encounter_context(queue_doc, remote_config)
+	except Exception as exc:
+		_log_remote_error(
+			f"Remote context fetch failed for Encounter Queue {queue_doc.name}",
+			{"queue_name": queue_doc.name, "call_queue": queue_doc.call_queue, "error": str(exc), "traceback": frappe.get_traceback()},
+		)
+		_finalize_submission_failure(
+			queue_doc,
+			reason=f"Remote Frappe fetch failed: {exc}",
+			policy=policy,
+			request_payload={"remote_access": True, "remote_site_url": remote_config.get("remote_site_url")},
+			response_payload={"error": str(exc), "type": exc.__class__.__name__},
+		)
+		raise frappe.ValidationError(f"Remote Frappe fetch failed: {exc}") from exc
+
+	payload = build_elevenlabs_payload(queue_doc, queue_settings, remote_context=remote_context)
 	endpoint = f"{get_elevenlabs_base_url().rstrip('/')}/v1/convai/sip-trunk/outbound-call"
 	try:
 		status_code, response = _post_json(endpoint, payload, headers={"xi-api-key": api_key}, timeout=timeout)
@@ -643,12 +930,16 @@ def create_encounter_queue(
 	if not patient_encounter:
 		frappe.throw("patient_encounter is required")
 
-	encounter_doc = frappe.get_doc("Patient Encounter", patient_encounter)
 	call_queue = call_queue or get_default_call_queue()
 	if not call_queue:
 		frappe.throw("No open Call Queue found for Voice AI")
 
-	context = get_patient_context(encounter_doc)
+	remote_config = get_call_queue_remote_config(call_queue)
+	context = {}
+	if not remote_config.get("remote_access"):
+		encounter_doc = frappe.get_doc("Patient Encounter", patient_encounter)
+		context = get_patient_context(encounter_doc)
+
 	existing_name = get_existing_open_queue(patient_encounter)
 	created = not bool(existing_name)
 	reused = bool(existing_name)
@@ -656,11 +947,11 @@ def create_encounter_queue(
 
 	queue_doc.call_queue = call_queue
 	queue_doc.patient_encounter = patient_encounter
-	queue_doc.patient = context.get("patient")
-	queue_doc.patient_name = context.get("patient_name")
-	queue_doc.customer = context.get("customer")
-	queue_doc.customer_name = context.get("customer_name")
-	queue_doc.customer_phone = normalize_phone_number(customer_phone or context.get("customer_phone"))
+	queue_doc.patient = context.get("patient") or queue_doc.get("patient")
+	queue_doc.patient_name = context.get("patient_name") or queue_doc.get("patient_name")
+	queue_doc.customer = context.get("customer") or queue_doc.get("customer")
+	queue_doc.customer_name = context.get("customer_name") or queue_doc.get("customer_name")
+	queue_doc.customer_phone = normalize_phone_number(customer_phone or context.get("customer_phone") or queue_doc.get("customer_phone"))
 	queue_doc.source_system = source_system
 	queue_doc.external_queue_id = external_queue_id or queue_doc.external_queue_id
 	queue_doc.order_id = order_id or queue_doc.order_id
