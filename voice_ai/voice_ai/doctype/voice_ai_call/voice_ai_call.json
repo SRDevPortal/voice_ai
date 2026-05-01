@@ -43,9 +43,8 @@
   },
   {
    "fieldname": "patient_encounter",
-   "fieldtype": "Link",
-   "label": "Patient Encounter",
-   "options": "Patient Encounter"
+   "fieldtype": "Data",
+   "label": "Patient Encounter"
   },
   {
    "fieldname": "voice_worker",
