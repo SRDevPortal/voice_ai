@@ -20,7 +20,11 @@
   "assignment_mode",
   "retry_policy",
   "allowed_calling_from",
-  "allowed_calling_till"
+  "allowed_calling_till",
+  "remote_site_url",
+  "api_key",
+  "api_secret",
+  "remote_access"
  ],
  "fields": [
   {
@@ -113,6 +117,27 @@
    "fieldname": "allowed_calling_till",
    "fieldtype": "Time",
    "label": "Allowed Calling Till"
+  },
+  {
+   "fieldname": "remote_site_url",
+   "fieldtype": "Data",
+   "label": "Remote Site URL",
+   "options": "URL"
+  },
+  {
+   "fieldname": "api_key",
+   "fieldtype": "Password",
+   "label": "API Key"
+  },
+  {
+   "fieldname": "api_secret",
+   "fieldtype": "Password",
+   "label": "API Secret"
+  },
+  {
+   "fieldname": "remote_access",
+   "fieldtype": "Check",
+   "label": "Remote Access"
   }
  ],
  "grid_page_length": 50,
