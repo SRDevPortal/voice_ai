@@ -20,6 +20,12 @@ NON_SUBMITTED_QUEUE_STATUSES = {"Pending", "Assigned", "Picked", "In Progress", 
 RETRYABLE_TELEPHONY_STATUSES = {"busy", "no_answer", "timeout", "failed"}
 TERMINAL_QUEUE_STATUSES = {"Completed", "Failed", "Escalated", "Closed"}
 
+from voice_ai.voice_ai.assignment import (
+	ACTIVE_ASSIGNMENT_STATUSES,
+	refresh_account_active_load,
+	assign_worker_to_queue_doc,
+)
+
 
 def get_elevenlabs_api_key() -> str | None:
 	return frappe.conf.get("voice_ai_elevenlabs_api_key") or frappe.conf.get("elevenlabs_api_key")
@@ -107,9 +113,9 @@ def get_existing_open_queue(patient_encounter: str | None) -> str | None:
 	)
 
 
-def build_queue_response(queue_doc, created: bool, reused: bool) -> dict:
+def build_queue_response(queue_doc, created: bool = False, reused: bool = False, ok: bool = True) -> dict:
 	return {
-		"ok": True,
+		"ok": ok,
 		"created": created,
 		"reused": reused,
 		"queue_name": queue_doc.name,
@@ -448,11 +454,12 @@ def _finalize_submission_failure(
 		queue_doc.ended_at = queue_doc.ended_at or now_datetime()
 		append_note(queue_doc, reason)
 
-	queue_doc.reload()
 	queue_doc.db_set({
 		"telephony_status": queue_doc.telephony_status,
 		"queue_status": queue_doc.queue_status,
 		"last_status_at": queue_doc.last_status_at,
+		"assigned_account": queue_doc.assigned_account,
+		"telephony_trunk_id": queue_doc.telephony_trunk_id,
 		"ended_at": queue_doc.ended_at,
 		"notes": queue_doc.notes
 	})
@@ -733,6 +740,13 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 	timeout = cint(timeout or get_elevenlabs_timeout() or 90)
 	policy = get_retry_policy(queue_doc.retry_policy)
 
+	# 1. Assign worker if not already assigned (This handles Busy Filter and Capacity)
+	if not queue_doc.assigned_account:
+		account_name = assign_worker_to_queue_doc(queue_doc)
+		if not account_name:
+			# Stay Pending/Unassigned if busy or full
+			return build_queue_response(queue_doc, ok=False)
+
 	queue_doc.attempt_no = cint(queue_doc.attempt_no or 0) + 1
 	queue_doc.picked_at = queue_doc.picked_at or now_datetime()
 	queue_doc.last_status_at = now_datetime()
@@ -819,12 +833,16 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 			f"Submitted to ElevenLabs for {payload['to_number']} via queue {queue_settings.get('queue_name') or queue_doc.call_queue}",
 		)
 
-	queue_doc.reload()
+	# Atomic save for statuses to prevent overwrites
 	queue_doc.db_set({
 		"telephony_status": queue_doc.telephony_status,
 		"queue_status": queue_doc.queue_status,
 		"started_at": queue_doc.started_at,
 		"last_status_at": queue_doc.last_status_at,
+		"assigned_account": queue_doc.assigned_account,
+		"telephony_trunk_id": queue_doc.telephony_trunk_id,
+		"job_id": queue_doc.job_id,
+		"elevenlabs_conversation_id": queue_doc.elevenlabs_conversation_id,
 		"notes": queue_doc.notes
 	})
 	sync_call_log(queue_doc, request_payload=payload, response_payload=response)

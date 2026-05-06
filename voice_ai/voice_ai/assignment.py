@@ -41,11 +41,16 @@ def get_eligible_account(call_queue: str) -> dict | None:
 		return None
 
 	account = frappe.get_doc(ACCOUNT_DOCTYPE, queue_data.telephony_account)
+	# Force reload to bypass cache and get real-time limits
+	account.reload()
+	
 	if not account.enabled or account.status not in ACTIVE_WORKER_STATUSES:
 		return None
 
 	current_load = get_account_active_load(account.name)
-	max_calls = int(account.max_concurrent_calls or 1)
+	# FIX: Respect 0 as 0, default to 1 if null
+	max_calls = int(account.max_concurrent_calls if account.max_concurrent_calls is not None else 1)
+	
 	if current_load >= max_calls:
 		return None
 
@@ -58,16 +63,19 @@ def is_phone_busy_globally(phone: str, current_doc_name: str | None = None) -> b
 	if not phone:
 		return False
 	
+	from voice_ai.voice_ai.processor import normalize_phone_number
+	normalized_phone = normalize_phone_number(phone)
+	
 	# Any status that implies the telephony line is occupied or about to be
-	busy_statuses = ["Assigned", "Picked", "In Progress"]
+	busy_statuses = ["Assigned", "Picked", "In Progress", "Retry Scheduled"]
 	
 	filters = {
-		"customer_phone": phone,
+		"customer_phone": ["like", f"%{normalized_phone}"],
 		"queue_status": ["in", busy_statuses]
 	}
 	if current_doc_name:
 		filters["name"] = ["!=", current_doc_name]
-		
+	
 	return frappe.db.exists("Voice AI Encounter Queue", filters)
 
 def assign_worker_to_queue_doc(queue_doc) -> str | None:
@@ -76,7 +84,8 @@ def assign_worker_to_queue_doc(queue_doc) -> str | None:
 		return None
 	
 	# Global Busy Filter: Prevent concurrent calls to the same number
-	if is_phone_busy_globally(queue_doc.customer_phone, queue_doc.name):
+	busy = is_phone_busy_globally(queue_doc.customer_phone, queue_doc.name)
+	if busy:
 		return None
 	
 	if queue_doc.get("assigned_account"):
