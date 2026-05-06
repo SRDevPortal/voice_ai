@@ -7,24 +7,25 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
+  "sb_queue_info",
   "naming_series",
   "queue_name",
   "enabled",
-  "auto_assign_workers",
+  "cb_queue_status",
   "status",
   "priority",
-  "description",
+  "sb_ai_telephony",
+  "provider",
+  "telephony_account",
+  "cb_agent_config",
   "default_agent_id",
-  "default_phone_number_id",
-  "max_concurrent_items",
-  "assignment_mode",
-  "retry_policy",
+  "sb_scheduling_retries",
   "allowed_calling_from",
   "allowed_calling_till",
-  "remote_site_url",
-  "api_key",
-  "api_secret",
-  "remote_access"
+  "cb_retries",
+  "retry_policy",
+  "sb_description",
+  "description"
  ],
  "fields": [
   {
@@ -54,10 +55,19 @@
    "label": "Enabled"
   },
   {
+   "fieldname": "telephony_account",
+   "fieldtype": "Link",
+   "label": "Telephony Account",
+   "options": "Voice AI Telephony Account",
+   "reqd": 1,
+   "description": "The physical phone line (SIP Account) used for this queue."
+  },
+  {
    "default": "1",
    "fieldname": "auto_assign_workers",
    "fieldtype": "Check",
-   "label": "Auto Assign Workers"
+   "label": "Auto Assign Workers",
+   "hidden": 1
   },
   {
    "default": "Open",
@@ -67,6 +77,13 @@
    "in_standard_filter": 1,
    "label": "Status",
    "options": "Open\nPaused\nClosed"
+  },
+  {
+   "fieldname": "provider",
+   "fieldtype": "Select",
+   "label": "AI Provider",
+   "options": "elevenlabs\ncustom",
+   "default": "elevenlabs"
   },
   {
    "default": "100",
@@ -82,25 +99,23 @@
   {
    "fieldname": "default_agent_id",
    "fieldtype": "Data",
-   "label": "Default Agent ID"
-  },
-  {
-   "fieldname": "default_phone_number_id",
-   "fieldtype": "Data",
-   "label": "Default Phone Number ID"
+   "label": "Default Agent ID",
+   "description": "The default ElevenLabs config used for all calls in this queue (unless overridden by the Worker)."
   },
   {
    "default": "5",
    "fieldname": "max_concurrent_items",
    "fieldtype": "Int",
-   "label": "Max Concurrent Items"
+   "label": "Max Concurrent Items",
+   "hidden": 1
   },
   {
    "default": "Least Load",
    "fieldname": "assignment_mode",
    "fieldtype": "Select",
    "label": "Assignment Mode",
-   "options": "Least Load\nRound Robin"
+   "options": "Least Load\nRound Robin",
+   "hidden": 1
   },
   {
    "fieldname": "retry_policy",
@@ -122,22 +137,61 @@
    "fieldname": "remote_site_url",
    "fieldtype": "Data",
    "label": "Remote Site URL",
-   "options": "URL"
+   "options": "URL",
+   "hidden": 1
   },
   {
    "fieldname": "api_key",
    "fieldtype": "Password",
-   "label": "API Key"
+   "label": "API Key",
+   "hidden": 1
   },
   {
    "fieldname": "api_secret",
    "fieldtype": "Password",
-   "label": "API Secret"
+   "label": "API Secret",
+   "hidden": 1
   },
   {
    "fieldname": "remote_access",
    "fieldtype": "Check",
-   "label": "Remote Access"
+   "label": "Remote Access",
+   "hidden": 1
+  },
+  {
+   "fieldname": "sb_queue_info",
+   "fieldtype": "Section Break",
+   "label": "Queue Info"
+  },
+  {
+   "fieldname": "cb_queue_status",
+   "fieldtype": "Column Break",
+   "label": ""
+  },
+  {
+   "fieldname": "sb_ai_telephony",
+   "fieldtype": "Section Break",
+   "label": "Ai Telephony"
+  },
+  {
+   "fieldname": "cb_agent_config",
+   "fieldtype": "Column Break",
+   "label": ""
+  },
+  {
+   "fieldname": "sb_scheduling_retries",
+   "fieldtype": "Section Break",
+   "label": "Scheduling Retries"
+  },
+  {
+   "fieldname": "cb_retries",
+   "fieldtype": "Column Break",
+   "label": ""
+  },
+  {
+   "fieldname": "sb_description",
+   "fieldtype": "Section Break",
+   "label": "Description"
   }
  ],
  "grid_page_length": 50,

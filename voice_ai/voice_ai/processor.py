@@ -41,20 +41,15 @@ def append_note(doc, note: str | None):
 	doc.notes = f"{existing}\n{line}".strip() if existing else line
 
 
-def normalize_phone_number(number: str | None) -> str | None:
-	value = (number or "").strip()
-	if not value:
-		return None
-	if value.startswith("+"):
-		return value
-	digits = "".join(ch for ch in value if ch.isdigit())
-	if not digits:
-		return None
-	if len(digits) == 10:
-		return f"+91{digits}"
-	if len(digits) > 10:
-		return f"+{digits}"
-	return value
+import re
+
+def normalize_phone_number(phone: str) -> str:
+	if not phone:
+		return ""
+	# Remove all non-digit characters
+	digits = re.sub(r"\D", "", str(phone))
+	# Strictly take only the last 10 digits
+	return digits[-10:] if len(digits) >= 10 else digits
 
 
 def get_default_call_queue() -> str | None:
@@ -99,7 +94,9 @@ def get_patient_context(encounter_doc) -> dict:
 	}
 
 
-def get_existing_open_queue(patient_encounter: str) -> str | None:
+def get_existing_open_queue(patient_encounter: str | None) -> str | None:
+	if not patient_encounter:
+		return None
 	return frappe.db.get_value(
 		QUEUE_DOCTYPE,
 		{
@@ -451,8 +448,14 @@ def _finalize_submission_failure(
 		queue_doc.ended_at = queue_doc.ended_at or now_datetime()
 		append_note(queue_doc, reason)
 
-	queue_doc.flags.ignore_permissions = True
-	queue_doc.save(ignore_permissions=True)
+	queue_doc.reload()
+	queue_doc.db_set({
+		"telephony_status": queue_doc.telephony_status,
+		"queue_status": queue_doc.queue_status,
+		"last_status_at": queue_doc.last_status_at,
+		"ended_at": queue_doc.ended_at,
+		"notes": queue_doc.notes
+	})
 	sync_call_log(queue_doc, request_payload=request_payload, response_payload=response_payload)
 	frappe.db.commit()
 
@@ -540,6 +543,7 @@ def build_encounter_order_context(queue_doc) -> dict:
 	return {
 		"order_items": order_items_text,
 		"payment_status": encounter_doc.get("payment_status") or "",
+		"advance_paid_amount": paid_total,
 		"outstanding_amount": max(flt(order_total - paid_total), 0.0),
 		"address": address,
 	}
@@ -549,6 +553,7 @@ def build_dynamic_variables(queue_doc, remote_context: dict | None = None) -> di
 	if remote_context:
 		return remote_context
 
+	# Fallback to local fetch
 	encounter_context = build_encounter_order_context(queue_doc)
 	return {
 		"queue_name": queue_doc.call_queue,
@@ -563,6 +568,7 @@ def build_dynamic_variables(queue_doc, remote_context: dict | None = None) -> di
 		"order_id": queue_doc.order_id or "",
 		"order_items": encounter_context["order_items"],
 		"payment_status": encounter_context["payment_status"],
+		"advance_paid_amount": encounter_context.get("advance_paid_amount", 0.0),
 		"outstanding_amount": encounter_context["outstanding_amount"],
 		"amount": encounter_context["outstanding_amount"],
 		"address": encounter_context["address"],
@@ -573,8 +579,9 @@ def build_dynamic_variables(queue_doc, remote_context: dict | None = None) -> di
 def build_elevenlabs_payload(queue_doc, queue_settings: dict, remote_context: dict | None = None) -> dict:
 	agent_id = queue_settings.get("default_agent_id")
 	phone_number_id = queue_settings.get("default_phone_number_id")
+	# Resolve to_number: prefer caller-supplied value, fall back to queue doc.
 	to_number = normalize_phone_number(
-		(remote_context or {}).get("customer_phone") if remote_context else queue_doc.customer_phone
+		(remote_context or {}).get("customer_phone") or queue_doc.customer_phone
 	)
 
 	if not agent_id:
@@ -604,6 +611,7 @@ def sync_call_log(queue_doc, request_payload: dict | None = None, response_paylo
 	call_doc.call_queue = queue_doc.call_queue
 	call_doc.encounter_queue = queue_doc.name
 	call_doc.patient_encounter = queue_doc.patient_encounter
+	call_doc.telephony_account = queue_doc.assigned_account
 	call_doc.attempt_no = queue_doc.attempt_no
 	call_doc.to_number = normalize_phone_number(queue_doc.customer_phone)
 	call_doc.call_status = queue_doc.telephony_status or "queued"
@@ -699,12 +707,20 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 		queue_doc.call_queue,
 		[
 			"default_agent_id",
-			"default_phone_number_id",
+			"provider",
+			"telephony_account",
 			"retry_policy",
 			"queue_name",
 		],
 		as_dict=True,
 	) or {}
+
+	if queue_settings.get("telephony_account"):
+		queue_settings["default_phone_number_id"] = frappe.db.get_value(
+			"Voice AI Telephony Account", 
+			queue_settings.telephony_account, 
+			"default_phone_number_id"
+		)
 	remote_config = get_call_queue_remote_config(queue_doc.call_queue)
 	api_key = get_elevenlabs_api_key()
 	if not api_key:
@@ -725,9 +741,16 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 
 	remote_context = None
 	try:
-		validate_remote_config(remote_config, queue_doc.call_queue)
-		if remote_config.get("remote_access"):
-			remote_context = build_remote_encounter_context(queue_doc, remote_config)
+		if queue_doc.payload_json:
+			# LEAN PATH: payload_json is the authoritative source.
+			# Send exactly what the caller provided — no system field injection.
+			payload = json.loads(queue_doc.payload_json)
+			if isinstance(payload, dict):
+				remote_context = payload
+		else:
+			validate_remote_config(remote_config, queue_doc.call_queue)
+			if remote_config.get("remote_access"):
+				remote_context = build_remote_encounter_context(queue_doc, remote_config)
 	except Exception as exc:
 		_log_remote_error(
 			f"Remote context fetch failed for Encounter Queue {queue_doc.name}",
@@ -796,8 +819,14 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 			f"Submitted to ElevenLabs for {payload['to_number']} via queue {queue_settings.get('queue_name') or queue_doc.call_queue}",
 		)
 
-	queue_doc.flags.ignore_permissions = True
-	queue_doc.save(ignore_permissions=True)
+	queue_doc.reload()
+	queue_doc.db_set({
+		"telephony_status": queue_doc.telephony_status,
+		"queue_status": queue_doc.queue_status,
+		"started_at": queue_doc.started_at,
+		"last_status_at": queue_doc.last_status_at,
+		"notes": queue_doc.notes
+	})
 	sync_call_log(queue_doc, request_payload=payload, response_payload=response)
 	frappe.db.commit()
 
@@ -862,13 +891,32 @@ def process_call_queue(call_queue: str) -> dict:
 	dispatch_items = [*ready_items["fresh"], *ready_items["due_retries"]]
 	processed = []
 	errors = []
+	from voice_ai.voice_ai.assignment import assign_worker_to_queue_doc
+
 	for queue_name in dispatch_items:
 		try:
-			result = submit_encounter_queue(queue_name)
-			processed.append(result["queue_name"])
+			queue_doc = frappe.get_doc(QUEUE_DOCTYPE, queue_name)
+			worker_id = assign_worker_to_queue_doc(queue_doc)
+			if not worker_id:
+				break
+			
+			bg_queue = frappe.db.get_value("Voice AI Telephony Account", worker_id, "background_queue_name") or "default"
+			
+			queue_doc.flags.ignore_permissions = True
+			queue_doc.save(ignore_permissions=True)
+			frappe.db.commit()
+
+			frappe.enqueue(
+				"voice_ai.voice_ai.processor.submit_encounter_queue",
+				queue_name=queue_name,
+				queue=bg_queue,
+				timeout=300,
+				is_async=True
+			)
+			processed.append(queue_name)
 		except Exception as exc:
 			errors.append({"queue_name": queue_name, "error": str(exc)})
-			frappe.log_error(frappe.get_traceback(), f"voice_ai queue processor failed for {queue_name}")
+			frappe.log_error(frappe.get_traceback(), f"voice_ai queue processor failed to enqueue {queue_name}")
 
 	return {
 		"queue": call_queue,
@@ -927,8 +975,7 @@ def create_encounter_queue(
 	submit_now = cint(submit_now if submit_now is not None else request_payload.get("submit_now") or 0)
 	payload_json = payload_json or request_payload.get("payload_json") or request_json or None
 
-	if not patient_encounter:
-		frappe.throw("patient_encounter is required")
+	# Removed mandatory patient_encounter check
 
 	call_queue = call_queue or get_default_call_queue()
 	if not call_queue:
@@ -936,10 +983,8 @@ def create_encounter_queue(
 
 	remote_config = get_call_queue_remote_config(call_queue)
 	context = {}
-	if not remote_config.get("remote_access"):
-		encounter_doc = frappe.get_doc("Patient Encounter", patient_encounter)
-		context = get_patient_context(encounter_doc)
-
+	# Removed local validation for cross-site compatibility
+	
 	existing_name = get_existing_open_queue(patient_encounter)
 	created = not bool(existing_name)
 	reused = bool(existing_name)
@@ -983,3 +1028,93 @@ def create_encounter_queue(
 @frappe.whitelist()
 def process_voice_ai_queues():
 	return process_open_call_queues()
+
+@frappe.whitelist()
+def update_encounter_status(name: str | None = None, **kwargs):
+	"""
+	Atomic update for Encounter Queue records. 
+	Safe for concurrent calls from multiple webhooks (Vobiz & ElevenLabs).
+	Supports 2. Triple-Lock Lookup: TrunkID + Phone + Active Status
+	"""
+	# DEBUG: Log RAW input
+	frappe.log_error(
+		title="Triple-Lock Raw Input",
+		message=f"Name: {name}\nArgs: {json.dumps(kwargs, indent=2)}"
+	)
+
+	# SELF-HEALING: If n8n sent the entire JSON as a key (common in misconfigured webhooks)
+	for key in list(kwargs.keys()):
+		if key.strip().startswith("{") and key.strip().endswith("}"):
+			try:
+				json_data = json.loads(key)
+				kwargs.update(json_data)
+				# Clean up the messy key
+				del kwargs[key]
+			except:
+				pass
+
+	trunk_id = kwargs.get("telephony_trunk_id")
+	customer_phone = kwargs.get("customer_phone")
+
+	if not name and trunk_id and customer_phone:
+		phone = normalize_phone_number(customer_phone)
+		
+		# DEBUG: Log what we received vs what we are searching for
+		frappe.log_error(
+			title="Triple-Lock Debug",
+			message=f"Incoming Phone: {customer_phone} (Normalized: {phone})\nIncoming Trunk: {trunk_id}"
+		)
+		
+		# Search with both formats (normalized and original) to be safe
+		name = frappe.db.get_value(
+			"Voice AI Encounter Queue",
+			{
+				"telephony_trunk_id": trunk_id,
+				"customer_phone": ["like", f"%{phone}"],
+				"queue_status": ["in", ["In Progress", "Picked", "Assigned", "Retry Scheduled"]]
+			},
+			"name",
+			order_by="creation desc"
+		)
+
+	if not name or not frappe.db.exists(QUEUE_DOCTYPE, name):
+		frappe.throw(f"Encounter Queue {name or 'matching trunk/phone'} not found")
+
+	# Sanitize and pick allowed fields
+	allowed_fields = {
+		"queue_status", "telephony_status", "business_outcome", 
+		"transcript", "summary", "payload_json", "elevenlabs_conversation_id"
+	}
+	
+	update_dict = {}
+	for key, value in kwargs.items():
+		if key in allowed_fields and value is not None:
+			update_dict[key] = value
+
+	if not update_dict:
+		return {"status": "skipped", "message": "No valid fields provided for update"}
+
+	# Use db_set for atomic, non-overwriting update
+	# This prevents race conditions between Vobiz and ElevenLabs webhooks
+	frappe.db.set_value(QUEUE_DOCTYPE, name, update_dict, update_modified=True)
+	
+	# Sync the Call Log as well
+	queue_doc = frappe.get_doc(QUEUE_DOCTYPE, name)
+	sync_call_log(queue_doc)
+
+	# Trigger Retry Logic if telephony status is a failure (not completed)
+	telephony_status = update_dict.get("telephony_status")
+	if telephony_status and telephony_status not in ["completed", "queued", "dialing", "ringing", "in_progress"]:
+		_finalize_submission_failure(
+			queue_doc, 
+			reason=f"Telephony failure: {telephony_status}"
+		)
+
+	# If status is terminal, refresh the account load to release the concurrency slot
+	if update_dict.get("queue_status") in TERMINAL_QUEUE_STATUSES:
+		assigned_account = queue_doc.assigned_account
+		if assigned_account:
+			from voice_ai.voice_ai.assignment import refresh_account_active_load
+			refresh_account_active_load(assigned_account)
+
+	return {"status": "success", "updated_fields": list(update_dict.keys())}

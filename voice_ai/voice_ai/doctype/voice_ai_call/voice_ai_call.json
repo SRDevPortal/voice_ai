@@ -10,7 +10,7 @@
   "call_queue",
   "encounter_queue",
   "patient_encounter",
-  "voice_worker",
+  "telephony_account",
   "attempt_no",
   "to_number",
   "call_status",
@@ -47,10 +47,10 @@
    "label": "Patient Encounter"
   },
   {
-   "fieldname": "voice_worker",
+   "fieldname": "telephony_account",
    "fieldtype": "Link",
-   "label": "Voice Worker",
-   "options": "Voice AI Worker"
+   "label": "Telephony Account",
+   "options": "Voice AI Telephony Account"
   },
   {
    "default": "0",

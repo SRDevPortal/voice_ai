@@ -4,109 +4,99 @@ from __future__ import annotations
 
 import frappe
 
-
 ACTIVE_ASSIGNMENT_STATUSES = {"Assigned", "Picked", "In Progress", "Retry Scheduled"}
 ACTIVE_WORKER_STATUSES = {"idle", "ready", "busy"}
 
+ACCOUNT_DOCTYPE = "Voice AI Telephony Account"
 
-def get_worker_active_load(worker_name: str) -> int:
+def get_account_active_load(account_name: str) -> int:
 	return frappe.db.count(
 		"Voice AI Encounter Queue",
 		{
-			"assigned_worker": worker_name,
+			"assigned_account": account_name,
 			"queue_status": ["in", list(ACTIVE_ASSIGNMENT_STATUSES)],
 		},
 	)
 
-
-def refresh_worker_active_load(worker_name: str) -> int:
-	load = get_worker_active_load(worker_name)
-	if frappe.db.exists("Voice AI Worker", worker_name):
-		frappe.db.set_value("Voice AI Worker", worker_name, "current_active_calls", load, update_modified=False)
+def refresh_account_active_load(account_name: str) -> int:
+	load = get_account_active_load(account_name)
+	if frappe.db.exists(ACCOUNT_DOCTYPE, account_name):
+		frappe.db.set_value(ACCOUNT_DOCTYPE, account_name, "current_active_calls", load, update_modified=False)
 	return load
 
-
-def get_eligible_workers(call_queue: str) -> list[dict]:
+def get_eligible_account(call_queue: str) -> dict | None:
 	if not call_queue:
-		return []
+		return None
 
-	queue_settings = frappe.db.get_value(
+	queue_data = frappe.db.get_value(
 		"Call Queue",
 		call_queue,
-		["enabled", "status", "auto_assign_workers"],
+		["enabled", "status", "auto_assign_workers", "telephony_account"],
 		as_dict=True,
 	)
-	if not queue_settings or not queue_settings.enabled or queue_settings.status != "Open":
-		return []
-	if not int(queue_settings.auto_assign_workers or 0):
-		return []
+	if not queue_data or not queue_data.enabled or queue_data.status != "Open":
+		return None
+	
+	if not queue_data.telephony_account:
+		return None
 
-	workers = frappe.get_all(
-		"Voice AI Worker",
-		filters={
-			"enabled": 1,
-			"auto_assign_enabled": 1,
-			"status": ["in", list(ACTIVE_WORKER_STATUSES)],
-		},
-		fields=[
-			"name",
-			"worker_name",
-			"status",
-			"max_concurrent_calls",
-			"assignment_priority",
-			"default_agent_id",
-			"default_phone_number_id",
-		],
-		order_by="assignment_priority asc, modified asc",
-	)
+	account = frappe.get_doc(ACCOUNT_DOCTYPE, queue_data.telephony_account)
+	if not account.enabled or account.status not in ACTIVE_WORKER_STATUSES:
+		return None
 
-	eligible = []
-	for worker in workers:
-		allowed_queue = frappe.db.exists(
-			"Voice AI Worker Queue",
-			{"parent": worker.name, "parenttype": "Voice AI Worker", "call_queue": call_queue},
-		)
-		if not allowed_queue:
-			continue
+	current_load = get_account_active_load(account.name)
+	max_calls = int(account.max_concurrent_calls or 1)
+	if current_load >= max_calls:
+		return None
 
-		current_load = get_worker_active_load(worker.name)
-		max_calls = int(worker.max_concurrent_calls or 1)
-		if current_load >= max_calls:
-			continue
+	account_dict = account.as_dict()
+	account_dict["current_load"] = current_load
+	return account_dict
 
-		worker["current_load"] = current_load
-		eligible.append(worker)
-
-	return sorted(
-		eligible,
-		key=lambda row: (
-			int(row.get("current_load") or 0),
-			int(row.get("assignment_priority") or 100),
-			(row.get("worker_name") or row.get("name") or ""),
-		),
-	)
-
+def is_phone_busy_globally(phone: str, current_doc_name: str | None = None) -> bool:
+	"""Check if there is already an active call session for this phone number."""
+	if not phone:
+		return False
+	
+	# Any status that implies the telephony line is occupied or about to be
+	busy_statuses = ["Assigned", "Picked", "In Progress"]
+	
+	filters = {
+		"customer_phone": phone,
+		"queue_status": ["in", busy_statuses]
+	}
+	if current_doc_name:
+		filters["name"] = ["!=", current_doc_name]
+		
+	return frappe.db.exists("Voice AI Encounter Queue", filters)
 
 def assign_worker_to_queue_doc(queue_doc) -> str | None:
+	"""Legacy named function, now assigns Telephony Account."""
 	if not queue_doc.get("call_queue"):
 		return None
-	if queue_doc.get("assigned_worker"):
-		refresh_worker_active_load(queue_doc.assigned_worker)
-		return queue_doc.assigned_worker
+	
+	# Global Busy Filter: Prevent concurrent calls to the same number
+	if is_phone_busy_globally(queue_doc.customer_phone, queue_doc.name):
+		return None
+	
+	if queue_doc.get("assigned_account"):
+		refresh_account_active_load(queue_doc.assigned_account)
+		return queue_doc.assigned_account
 
-	eligible = get_eligible_workers(queue_doc.call_queue)
-	if not eligible:
+	eligible_account = get_eligible_account(queue_doc.call_queue)
+	if not eligible_account:
 		return None
 
-	best_worker = eligible[0]
-	queue_doc.assigned_worker = best_worker.name
+
+	queue_doc.assigned_account = eligible_account.name
+	queue_doc.telephony_trunk_id = eligible_account.telephony_trunk_id
 	queue_doc.assigned_agent = (
-		best_worker.get("default_agent_id")
-		or queue_doc.get("assigned_agent")
+		queue_doc.get("assigned_agent")
 		or frappe.db.get_value("Call Queue", queue_doc.call_queue, "default_agent_id")
 	)
+
 	if (queue_doc.get("queue_status") or "Pending") == "Pending":
 		queue_doc.queue_status = "Assigned"
 	if not queue_doc.get("assigned_at"):
 		queue_doc.assigned_at = frappe.utils.now_datetime()
-	return queue_doc.assigned_worker
+	return queue_doc.assigned_account

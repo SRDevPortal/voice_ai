@@ -1,37 +1,44 @@
 {
  "actions": [],
  "allow_rename": 1,
- "autoname": "field:worker_name",
+ "autoname": "field:account_name",
  "creation": "2026-04-16 17:45:00.000000",
  "doctype": "DocType",
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
-  "worker_name",
+  "sb_account_status",
+  "account_name",
+  "telephony_trunk_id",
   "enabled",
-  "auto_assign_enabled",
+  "cb_status",
   "status",
-  "provider",
-  "telephony_provider",
-  "default_agent_id",
-  "default_phone_number_id",
-  "max_concurrent_calls",
-  "assignment_priority",
   "current_active_calls",
-  "queue_assignments",
-  "last_heartbeat",
-  "last_seen_ip",
+  "sb_configuration",
+  "telephony_provider",
+  "default_phone_number_id",
+  "cb_limits",
+  "max_concurrent_calls",
+  "sb_advanced",
+  "background_queue_name",
+  "sb_notes",
   "notes"
  ],
  "fields": [
   {
-   "fieldname": "worker_name",
+   "fieldname": "account_name",
    "fieldtype": "Data",
    "in_list_view": 1,
    "in_standard_filter": 1,
-   "label": "Worker Name",
+   "label": "Account Name",
    "reqd": 1,
    "unique": 1
+  },
+  {
+   "description": "Unique ID from Provider (e.g. Vobiz Trunk ID) used for webhook mapping.",
+   "fieldname": "telephony_trunk_id",
+   "fieldtype": "Data",
+   "label": "Telephony Trunk ID"
   },
   {
    "default": "1",
@@ -44,6 +51,7 @@
    "default": "1",
    "fieldname": "auto_assign_enabled",
    "fieldtype": "Check",
+   "hidden": 1,
    "label": "Auto Assign Enabled"
   },
   {
@@ -56,11 +64,11 @@
    "options": "idle\nready\nbusy\noffline\nerror"
   },
   {
-   "default": "elevenlabs",
-   "fieldname": "provider",
-   "fieldtype": "Select",
-   "label": "Provider",
-   "options": "elevenlabs\ncustom"
+   "default": "default",
+   "description": "Advanced: Route execution to a dedicated Frappe queue (e.g. queue_a) instead of 'default'.",
+   "fieldname": "background_queue_name",
+   "fieldtype": "Data",
+   "label": "Background Queue Name"
   },
   {
    "default": "vobiz",
@@ -70,17 +78,14 @@
    "options": "vobiz\ntwilio\ncustom"
   },
   {
-   "fieldname": "default_agent_id",
-   "fieldtype": "Data",
-   "label": "Default Agent ID"
-  },
-  {
+   "description": "Overrides the Queue default. Leave blank to use the Queue's settings.",
    "fieldname": "default_phone_number_id",
    "fieldtype": "Data",
    "label": "Default Phone Number ID"
   },
   {
    "default": "1",
+   "description": "Strict limit for this telephony account (e.g. 3 for Vobiz).",
    "fieldname": "max_concurrent_calls",
    "fieldtype": "Int",
    "label": "Max Concurrent Calls"
@@ -89,36 +94,64 @@
    "default": "100",
    "fieldname": "assignment_priority",
    "fieldtype": "Int",
+   "hidden": 1,
    "label": "Assignment Priority"
   },
   {
    "default": "0",
+   "description": "Current active calls across all queues using this account.",
    "fieldname": "current_active_calls",
    "fieldtype": "Int",
    "label": "Current Active Calls",
    "read_only": 1
   },
   {
-   "fieldname": "queue_assignments",
-   "fieldtype": "Table",
-   "label": "Queue Assignments",
-   "options": "Voice AI Worker Queue"
-  },
-  {
    "fieldname": "last_heartbeat",
    "fieldtype": "Datetime",
+   "hidden": 1,
    "label": "Last Heartbeat",
    "read_only": 1
   },
   {
    "fieldname": "last_seen_ip",
    "fieldtype": "Data",
+   "hidden": 1,
    "label": "Last Seen IP",
    "read_only": 1
   },
   {
    "fieldname": "notes",
    "fieldtype": "Small Text",
+   "label": "Notes"
+  },
+  {
+   "fieldname": "sb_account_status",
+   "fieldtype": "Section Break",
+   "label": "Account Status"
+  },
+  {
+   "fieldname": "cb_status",
+   "fieldtype": "Column Break",
+   "label": ""
+  },
+  {
+   "fieldname": "sb_configuration",
+   "fieldtype": "Section Break",
+   "label": "Configuration"
+  },
+  {
+   "fieldname": "cb_limits",
+   "fieldtype": "Column Break",
+   "label": ""
+  },
+  {
+   "fieldname": "sb_advanced",
+   "fieldtype": "Section Break",
+   "label": "Advanced"
+  },
+  {
+   "fieldname": "sb_notes",
+   "fieldtype": "Section Break",
    "label": "Notes"
   }
  ],
@@ -129,7 +162,7 @@
  "modified": "2026-04-16 17:45:00.000000",
  "modified_by": "Administrator",
  "module": "Voice AI",
- "name": "Voice AI Worker",
+ "name": "Voice AI Telephony Account",
  "owner": "Administrator",
  "permissions": [
   {
