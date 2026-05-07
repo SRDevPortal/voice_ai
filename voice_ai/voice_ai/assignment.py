@@ -5,6 +5,7 @@ from __future__ import annotations
 import frappe
 
 ACTIVE_ASSIGNMENT_STATUSES = {"Assigned", "Picked", "In Progress", "Retry Scheduled"}
+ACTIVE_LOAD_STATUSES = {"Picked", "In Progress"}
 ACTIVE_WORKER_STATUSES = {"idle", "ready", "busy"}
 
 ACCOUNT_DOCTYPE = "Voice AI Telephony Account"
@@ -14,7 +15,7 @@ def get_account_active_load(account_name: str) -> int:
 		"Voice AI Encounter Queue",
 		{
 			"assigned_account": account_name,
-			"queue_status": ["in", list(ACTIVE_ASSIGNMENT_STATUSES)],
+			"queue_status": ["in", list(ACTIVE_LOAD_STATUSES)],
 		},
 	)
 
@@ -24,7 +25,7 @@ def refresh_account_active_load(account_name: str) -> int:
 		frappe.db.set_value(ACCOUNT_DOCTYPE, account_name, "current_active_calls", load, update_modified=False)
 	return load
 
-def get_eligible_account(call_queue: str) -> dict | None:
+def get_eligible_account(call_queue: str, ignore_capacity: bool = False) -> dict | None:
 	if not call_queue:
 		return None
 
@@ -47,15 +48,15 @@ def get_eligible_account(call_queue: str) -> dict | None:
 	if not account.enabled or account.status not in ACTIVE_WORKER_STATUSES:
 		return None
 
-	current_load = get_account_active_load(account.name)
-	# FIX: Respect 0 as 0, default to 1 if null
-	max_calls = int(account.max_concurrent_calls if account.max_concurrent_calls is not None else 1)
-	
-	if current_load >= max_calls:
-		return None
+	if not ignore_capacity:
+		current_load = get_account_active_load(account.name)
+		# FIX: Respect 0 as 0, default to 1 if null
+		max_calls = int(account.max_concurrent_calls if account.max_concurrent_calls is not None else 1)
+		
+		if current_load >= max_calls:
+			return None
 
 	account_dict = account.as_dict()
-	account_dict["current_load"] = current_load
 	return account_dict
 
 def is_phone_busy_globally(phone: str, current_doc_name: str | None = None) -> bool:
@@ -83,29 +84,40 @@ def assign_worker_to_queue_doc(queue_doc) -> str | None:
 	if not queue_doc.get("call_queue"):
 		return None
 	
-	# Global Busy Filter: Prevent concurrent calls to the same number
+	if not queue_doc.get("assigned_account"):
+		# INITIAL ASSIGNMENT: Always assign at birth if possible, ignoring capacity
+		eligible_account = get_eligible_account(queue_doc.call_queue, ignore_capacity=True)
+		if eligible_account:
+			queue_doc.assigned_account = eligible_account["name"]
+			queue_doc.telephony_trunk_id = eligible_account.get("telephony_trunk_id")
+			queue_doc.assigned_at = frappe.utils.now_datetime()
+	
+	if not queue_doc.assigned_account:
+		return None
+
+	# GLOBAL BUSY CHECK
 	busy = is_phone_busy_globally(queue_doc.customer_phone, queue_doc.name)
 	if busy:
 		return None
-	
-	if queue_doc.get("assigned_account"):
-		refresh_account_active_load(queue_doc.assigned_account)
-		return queue_doc.assigned_account
-
-	eligible_account = get_eligible_account(queue_doc.call_queue)
-	if not eligible_account:
+		
+	# CAPACITY CHECK
+	account_data = frappe.db.get_value(ACCOUNT_DOCTYPE, queue_doc.assigned_account, ["enabled", "status", "max_concurrent_calls"], as_dict=True)
+	if not account_data or not account_data.enabled or account_data.status not in ACTIVE_WORKER_STATUSES:
 		return None
 
+	current_load = get_account_active_load(queue_doc.assigned_account)
+	max_calls = int(account_data.max_concurrent_calls if account_data.max_concurrent_calls is not None else 1)
+	if current_load >= max_calls:
+		return None
 
-	queue_doc.assigned_account = eligible_account.name
-	queue_doc.telephony_trunk_id = eligible_account.telephony_trunk_id
+	refresh_account_active_load(queue_doc.assigned_account)
+	
+	if (queue_doc.get("queue_status") or "Pending") == "Pending":
+		queue_doc.queue_status = "Assigned"
+	
 	queue_doc.assigned_agent = (
 		queue_doc.get("assigned_agent")
 		or frappe.db.get_value("Call Queue", queue_doc.call_queue, "default_agent_id")
 	)
 
-	if (queue_doc.get("queue_status") or "Pending") == "Pending":
-		queue_doc.queue_status = "Assigned"
-	if not queue_doc.get("assigned_at"):
-		queue_doc.assigned_at = frappe.utils.now_datetime()
 	return queue_doc.assigned_account

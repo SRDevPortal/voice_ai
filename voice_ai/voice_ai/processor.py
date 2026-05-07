@@ -24,6 +24,8 @@ from voice_ai.voice_ai.assignment import (
 	ACTIVE_ASSIGNMENT_STATUSES,
 	refresh_account_active_load,
 	assign_worker_to_queue_doc,
+	is_phone_busy_globally,
+	get_account_active_load,
 )
 
 
@@ -113,9 +115,10 @@ def get_existing_open_queue(patient_encounter: str | None) -> str | None:
 	)
 
 
-def build_queue_response(queue_doc, created: bool = False, reused: bool = False, ok: bool = True) -> dict:
+def build_queue_response(queue_doc, created: bool = False, reused: bool = False, ok: bool = True, message: str | None = None) -> dict:
 	return {
 		"ok": ok,
+		"message": message,
 		"created": created,
 		"reused": reused,
 		"queue_name": queue_doc.name,
@@ -464,6 +467,11 @@ def _finalize_submission_failure(
 		"notes": queue_doc.notes
 	})
 	sync_call_log(queue_doc, request_payload=request_payload, response_payload=response_payload)
+	
+	if queue_doc.assigned_account:
+		from voice_ai.voice_ai.assignment import refresh_account_active_load
+		refresh_account_active_load(queue_doc.assigned_account)
+		
 	frappe.db.commit()
 
 
@@ -753,6 +761,21 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 	queue_doc.last_status_change_source = "Queue Processor"
 	queue_doc.queue_status = "Picked"
 
+	if is_phone_busy_globally(queue_doc.customer_phone, current_doc_name=queue_doc.name):
+		# Cooldown if phone is busy
+		queue_doc.queue_status = "Retry Scheduled"
+		queue_doc.db_set({"queue_status": "Retry Scheduled"})
+		return build_queue_response(queue_doc, ok=False, message="Phone line is busy")
+		
+	current_load = get_account_active_load(queue_doc.assigned_account)
+	max_calls = frappe.db.get_value("Voice AI Telephony Account", queue_doc.assigned_account, "max_concurrent_calls")
+	max_calls = int(max_calls if max_calls is not None else 1)
+	if current_load >= max_calls:
+		# Stay Pending if account is full
+		queue_doc.queue_status = "Pending"
+		queue_doc.db_set({"queue_status": "Pending"})
+		return build_queue_response(queue_doc, ok=False, message="Account capacity exceeded")
+
 	remote_context = None
 	try:
 		if queue_doc.payload_json:
@@ -814,8 +837,12 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 		or queue_doc.elevenlabs_conversation_id
 	)
 
-	if status_code >= 400:
+	# API FAILURE HANDLING: Catch ElevenLabs submission errors
+	if status_code >= 400 or (isinstance(response, dict) and response.get("status") == "error"):
 		reason = f"ElevenLabs submission failed with status {status_code}"
+		if isinstance(response, dict) and response.get("message"):
+			reason = f"ElevenLabs API Error: {response['message']}"
+			
 		_finalize_submission_failure(
 			queue_doc,
 			reason=reason,
@@ -823,7 +850,9 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 			request_payload=payload,
 			response_payload=response,
 		)
+		return build_queue_response(queue_doc, ok=False, message=reason)
 	else:
+		frappe.log_error("ElevenLabs Success", f"Status {status_code}. Setting {queue_doc.name} to In Progress")
 		queue_doc.telephony_status = "dialing"
 		queue_doc.queue_status = "In Progress"
 		queue_doc.started_at = queue_doc.started_at or now_datetime()
@@ -898,6 +927,35 @@ def get_due_queue_items(call_queue: str) -> dict[str, list[str]]:
 	}
 
 
+def get_active_background_queues():
+	"""Returns a list of active physical background workers on the server."""
+	try:
+		from frappe.utils.background_jobs import get_queues
+		return get_queues() or ["default", "long", "short"]
+	except:
+		return ["default", "long", "short"]
+
+def cleanup_stale_in_progress_calls():
+	"""Mark calls stuck in 'In Progress' for > 15 mins as Failed."""
+	timeout_mins = 15
+	stale_threshold = frappe.utils.add_to_date(None, minutes=-timeout_mins)
+	
+	stale_items = frappe.get_all(
+		QUEUE_DOCTYPE,
+		filters={
+			"queue_status": "In Progress",
+			"last_status_at": ["<", stale_threshold]
+		},
+		fields=["name", "assigned_account"]
+	)
+	
+	for item in stale_items:
+		doc = frappe.get_doc(QUEUE_DOCTYPE, item.name)
+		_finalize_submission_failure(
+			doc, 
+			reason=f"Stale call: Stuck in In Progress for > {timeout_mins} minutes"
+		)
+
 def process_call_queue(call_queue: str) -> dict:
 	queue_doc = frappe.get_doc(CALL_QUEUE_DOCTYPE, call_queue)
 	if not queue_doc.enabled or queue_doc.status != "Open":
@@ -916,7 +974,8 @@ def process_call_queue(call_queue: str) -> dict:
 			queue_doc = frappe.get_doc(QUEUE_DOCTYPE, queue_name)
 			worker_id = assign_worker_to_queue_doc(queue_doc)
 			if not worker_id:
-				break
+				# SKIP if blocked, but don't stall the whole queue
+				continue
 			
 			bg_queue = frappe.db.get_value("Voice AI Telephony Account", worker_id, "background_queue_name") or "default"
 			
@@ -924,13 +983,24 @@ def process_call_queue(call_queue: str) -> dict:
 			queue_doc.save(ignore_permissions=True)
 			frappe.db.commit()
 
-			frappe.enqueue(
-				"voice_ai.voice_ai.processor.submit_encounter_queue",
-				queue_name=queue_name,
-				queue=bg_queue,
-				timeout=300,
-				is_async=True
-			)
+			try:
+				frappe.enqueue(
+					"voice_ai.voice_ai.processor.submit_encounter_queue",
+					queue_name=queue_name,
+					queue=bg_queue,
+					timeout=300,
+					is_async=True
+				)
+			except frappe.ValidationError:
+				# FALLBACK: If the specified queue (e.g. 'order_confirmation') isn't registered on the server,
+				# use the 'default' queue instead of crashing the scheduler.
+				frappe.enqueue(
+					"voice_ai.voice_ai.processor.submit_encounter_queue",
+					queue_name=queue_name,
+					queue="default",
+					timeout=300,
+					is_async=True
+				)
 			processed.append(queue_name)
 		except Exception as exc:
 			errors.append({"queue_name": queue_name, "error": str(exc)})
@@ -948,6 +1018,9 @@ def process_call_queue(call_queue: str) -> dict:
 
 
 def process_open_call_queues() -> dict:
+	# 1. Cleanup stale calls (timeout protection)
+	cleanup_stale_in_progress_calls()
+
 	results = []
 	for row in frappe.get_all(
 		CALL_QUEUE_DOCTYPE,
@@ -995,7 +1068,14 @@ def create_encounter_queue(
 
 	# Removed mandatory patient_encounter check
 
-	call_queue = call_queue or get_default_call_queue()
+	call_queue = call_queue or request_payload.get("call_queue") or get_default_call_queue()
+	
+	# Flexible Lookup: If call_queue is a Display Name, find its ID
+	if call_queue and not frappe.db.exists(CALL_QUEUE_DOCTYPE, call_queue):
+		resolved_id = frappe.db.get_value(CALL_QUEUE_DOCTYPE, {"queue_name": call_queue}, "name")
+		if resolved_id:
+			call_queue = resolved_id
+	
 	if not call_queue:
 		frappe.throw("No open Call Queue found for Voice AI")
 
@@ -1089,7 +1169,6 @@ def update_encounter_status(name: str | None = None, **kwargs):
 			{
 				"telephony_trunk_id": trunk_id,
 				"customer_phone": ["like", f"%{phone}"],
-				"queue_status": ["in", ["In Progress", "Picked", "Assigned", "Retry Scheduled"]]
 			},
 			"name",
 			order_by="creation desc"
@@ -1104,9 +1183,17 @@ def update_encounter_status(name: str | None = None, **kwargs):
 		"transcript", "summary", "payload_json", "elevenlabs_conversation_id"
 	}
 	
+	queue_doc = frappe.get_doc(QUEUE_DOCTYPE, name)
+	current_status = queue_doc.queue_status
+	terminal_statuses = {"Completed", "Failed", "Closed", "Retry Scheduled"}
+
 	update_dict = {}
 	for key, value in kwargs.items():
 		if key in allowed_fields and value is not None:
+			# STATUS PROTECTION: Never allow an "In Progress" update to overwrite a terminal status
+			# This prevents late-arriving ElevenLabs webhooks from flip-flopping a finished call.
+			if key == "queue_status" and value == "In Progress" and current_status in terminal_statuses:
+				continue
 			update_dict[key] = value
 
 	if not update_dict:
@@ -1128,11 +1215,20 @@ def update_encounter_status(name: str | None = None, **kwargs):
 			reason=f"Telephony failure: {telephony_status}"
 		)
 
-	# If status is terminal, refresh the account load to release the concurrency slot
-	if update_dict.get("queue_status") in TERMINAL_QUEUE_STATUSES:
+	# If status is changing away from an active load status, trigger reassignment
+	new_status = update_dict.get("queue_status")
+	from voice_ai.voice_ai.assignment import ACTIVE_LOAD_STATUSES, refresh_account_active_load
+	
+	# If the status moved from active (In Progress/Picked) to inactive (Completed/Failed/Retry Scheduled)
+	if new_status and new_status not in ACTIVE_LOAD_STATUSES and current_status in ACTIVE_LOAD_STATUSES:
 		assigned_account = queue_doc.assigned_account
 		if assigned_account:
-			from voice_ai.voice_ai.assignment import refresh_account_active_load
 			refresh_account_active_load(assigned_account)
+
+		# INSTANT REASSIGNMENT: Trigger next call if slot opened
+		try:
+			process_call_queue(queue_doc.call_queue)
+		except Exception:
+			frappe.log_error("Instant Reassignment Trigger Failed", frappe.get_traceback())
 
 	return {"status": "success", "updated_fields": list(update_dict.keys())}
