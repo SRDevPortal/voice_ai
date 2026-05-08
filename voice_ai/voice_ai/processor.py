@@ -927,6 +927,7 @@ def get_due_queue_items(call_queue: str) -> dict[str, list[str]]:
 	}
 
 
+@frappe.whitelist()
 def get_active_background_queues():
 	"""Returns a list of active physical background workers on the server."""
 	try:
@@ -956,7 +957,43 @@ def cleanup_stale_in_progress_calls():
 			reason=f"Stale call: Stuck in In Progress for > {timeout_mins} minutes"
 		)
 
+def cleanup_stuck_records(call_queue: str):
+	"""Mark records stuck in 'In Progress' for > 15 mins as Failed and release slots"""
+	timeout_mins = 15
+	cutoff = add_to_date(now_datetime(), minutes=-timeout_mins)
+	
+	stuck_items = frappe.get_all(QUEUE_DOCTYPE, filters={
+		"call_queue": call_queue,
+		"queue_status": "In Progress",
+		"modified": ["<", cutoff]
+	}, fields=["name", "assigned_account"])
+	
+	if not stuck_items:
+		return
+		
+	for item in stuck_items:
+		try:
+			doc = frappe.get_doc(QUEUE_DOCTYPE, item.name)
+			doc.queue_status = "Failed"
+			doc.telephony_status = "timeout"
+			doc.ended_at = now_datetime()
+			append_note(doc, f"Marked as Failed due to timeout (stuck in Progress > {timeout_mins} mins)")
+			doc.flags.ignore_permissions = True
+			doc.save(ignore_permissions=True)
+			
+			if item.assigned_account:
+				from voice_ai.voice_ai.assignment import refresh_account_active_load
+				refresh_account_active_load(item.assigned_account)
+				
+			frappe.db.commit()
+			frappe.log_error("Queue Cleanup", f"Marked {item.name} as Failed due to 15min timeout")
+		except Exception:
+			frappe.log_error("Queue Cleanup Failed", frappe.get_traceback())
+
 def process_call_queue(call_queue: str) -> dict:
+	# First, cleanup any stuck records to free up telephony slots
+	cleanup_stuck_records(call_queue)
+	
 	queue_doc = frappe.get_doc(CALL_QUEUE_DOCTYPE, call_queue)
 	if not queue_doc.enabled or queue_doc.status != "Open":
 		return {"queue": call_queue, "processed": 0, "reason": "queue_not_open"}
@@ -1199,6 +1236,8 @@ def update_encounter_status(name: str | None = None, **kwargs):
 	if not update_dict:
 		return {"status": "skipped", "message": "No valid fields provided for update"}
 
+
+
 	# Use db_set for atomic, non-overwriting update
 	# This prevents race conditions between Vobiz and ElevenLabs webhooks
 	frappe.db.set_value(QUEUE_DOCTYPE, name, update_dict, update_modified=True)
@@ -1230,5 +1269,17 @@ def update_encounter_status(name: str | None = None, **kwargs):
 			process_call_queue(queue_doc.call_queue)
 		except Exception:
 			frappe.log_error("Instant Reassignment Trigger Failed", frappe.get_traceback())
+	
+@frappe.whitelist()
+def read_logs():
+	logs = frappe.get_all("Error Log", fields=["method", "error", "creation"], order_by="creation desc", limit=10)
+	return logs
 
-	return {"status": "success", "updated_fields": list(update_dict.keys())}
+@frappe.whitelist()
+def analyze_webhook_formats():
+	logs = frappe.get_all("Error Log", 
+						 filters={"method": "Triple-Lock Raw Input"}, 
+						 fields=["error", "creation"],
+						 order_by="creation desc",
+						 limit=20)
+	return logs
