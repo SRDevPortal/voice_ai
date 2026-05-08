@@ -598,6 +598,9 @@ def build_elevenlabs_payload(queue_doc, queue_settings: dict, remote_context: di
 	to_number = normalize_phone_number(
 		(remote_context or {}).get("customer_phone") or queue_doc.customer_phone
 	)
+	# Prefix 91 for ElevenLabs outbound calls (India)
+	if to_number and len(to_number) == 10:
+		to_number = f"91{to_number}"
 
 	if not agent_id:
 		raise frappe.ValidationError(f"Call Queue {queue_doc.call_queue} is missing Default Agent ID")
@@ -628,7 +631,10 @@ def sync_call_log(queue_doc, request_payload: dict | None = None, response_paylo
 	call_doc.patient_encounter = queue_doc.patient_encounter
 	call_doc.telephony_account = queue_doc.assigned_account
 	call_doc.attempt_no = queue_doc.attempt_no
-	call_doc.to_number = normalize_phone_number(queue_doc.customer_phone)
+	to_number = normalize_phone_number(queue_doc.customer_phone)
+	if to_number and len(to_number) == 10:
+		to_number = f"91{to_number}"
+	call_doc.to_number = to_number
 	call_doc.call_status = queue_doc.telephony_status or "queued"
 	call_doc.session_id = queue_doc.session_id
 	call_doc.elevenlabs_conversation_id = queue_doc.elevenlabs_conversation_id
