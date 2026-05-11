@@ -1022,6 +1022,7 @@ def process_call_queue(call_queue: str) -> dict:
 			
 			bg_queue = frappe.db.get_value("Voice AI Telephony Account", worker_id, "background_queue_name") or "default"
 			
+			queue_doc.queue_status = "Picked"
 			queue_doc.flags.ignore_permissions = True
 			queue_doc.save(ignore_permissions=True)
 			frappe.db.commit()
