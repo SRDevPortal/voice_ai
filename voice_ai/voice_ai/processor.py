@@ -722,6 +722,14 @@ def validate_remote_config(remote_config: dict, call_queue: str):
 
 
 def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
+	import re
+	
+	# PREVENT CONCURRENT CALLS TO THE SAME RECORD:
+	# Fetch the current status directly from the database to avoid race conditions
+	db_status = frappe.db.get_value(QUEUE_DOCTYPE, queue_name, "queue_status")
+	if db_status in ["Picked", "In Progress", "Completed", "Failed"]:
+		return build_queue_response(frappe.get_doc(QUEUE_DOCTYPE, queue_name), ok=False, message=f"Record is already in {db_status} status")
+
 	queue_doc = frappe.get_doc(QUEUE_DOCTYPE, queue_name)
 	queue_settings = frappe.db.get_value(
 		CALL_QUEUE_DOCTYPE,
@@ -732,6 +740,9 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 			"telephony_account",
 			"retry_policy",
 			"queue_name",
+			"livekit_url",
+			"livekit_api_key",
+			"livekit_api_secret",
 		],
 		as_dict=True,
 	) or {}
@@ -743,11 +754,6 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 			"default_phone_number_id"
 		)
 	remote_config = get_call_queue_remote_config(queue_doc.call_queue)
-	api_key = get_elevenlabs_api_key()
-	if not api_key:
-		raise frappe.ValidationError(
-			"Missing ElevenLabs API key. Set voice_ai_elevenlabs_api_key or elevenlabs_api_key in site config."
-		)
 
 	if not queue_doc.retry_policy and queue_settings.get("retry_policy"):
 		queue_doc.retry_policy = queue_settings["retry_policy"]
@@ -761,16 +767,13 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 			# Stay Pending/Unassigned if busy or full
 			return build_queue_response(queue_doc, ok=False)
 
-	queue_doc.attempt_no = cint(queue_doc.attempt_no or 0) + 1
-	queue_doc.picked_at = queue_doc.picked_at or now_datetime()
-	queue_doc.last_status_at = now_datetime()
-	queue_doc.last_status_change_source = "Queue Processor"
-	queue_doc.queue_status = "Picked"
-
+	# PREVENT DUP CALLS TO SAME PHONE NUMBER:
+	# Check global busy status before setting status to Picked
 	if is_phone_busy_globally(queue_doc.customer_phone, current_doc_name=queue_doc.name):
 		# Cooldown if phone is busy
 		queue_doc.queue_status = "Retry Scheduled"
 		queue_doc.db_set({"queue_status": "Retry Scheduled"})
+		frappe.db.commit()
 		return build_queue_response(queue_doc, ok=False, message="Phone line is busy")
 		
 	current_load = get_account_active_load(queue_doc.assigned_account)
@@ -780,7 +783,26 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 		# Stay Pending if account is full
 		queue_doc.queue_status = "Pending"
 		queue_doc.db_set({"queue_status": "Pending"})
+		frappe.db.commit()
 		return build_queue_response(queue_doc, ok=False, message="Account capacity exceeded")
+
+	# ATOMICALLY LOCK THE DOCUMENT BY COMMITTING IT AS PICKED
+	queue_doc.attempt_no = cint(queue_doc.attempt_no or 0) + 1
+	queue_doc.picked_at = queue_doc.picked_at or now_datetime()
+	queue_doc.last_status_at = now_datetime()
+	queue_doc.last_status_change_source = "Queue Processor"
+	queue_doc.queue_status = "Picked"
+	
+	queue_doc.db_set({
+		"queue_status": "Picked",
+		"attempt_no": queue_doc.attempt_no,
+		"picked_at": queue_doc.picked_at,
+		"last_status_at": queue_doc.last_status_at,
+		"last_status_change_source": queue_doc.last_status_change_source,
+		"assigned_account": queue_doc.assigned_account,
+		"telephony_trunk_id": queue_doc.telephony_trunk_id
+	})
+	frappe.db.commit()
 
 	remote_context = None
 	try:
@@ -808,65 +830,204 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 		)
 		raise frappe.ValidationError(f"Remote Frappe fetch failed: {exc}") from exc
 
-	payload = build_elevenlabs_payload(queue_doc, queue_settings, remote_context=remote_context)
-	endpoint = f"{get_elevenlabs_base_url().rstrip('/')}/v1/convai/sip-trunk/outbound-call"
-	try:
-		status_code, response = _post_json(endpoint, payload, headers={"xi-api-key": api_key}, timeout=timeout)
-	except (TimeoutError, socket.timeout) as exc:
-		_finalize_submission_failure(
-			queue_doc,
-			reason=f"ElevenLabs request timed out after {timeout}s",
-			policy=policy,
-			request_payload=payload,
-			response_payload={"error": str(exc), "type": exc.__class__.__name__},
-		)
-		raise frappe.ValidationError(f"ElevenLabs request timed out after {timeout}s") from exc
-	except error.URLError as exc:
-		reason = f"ElevenLabs network error: {exc.reason}"
-		_finalize_submission_failure(
-			queue_doc,
-			reason=reason,
-			policy=policy,
-			request_payload=payload,
-			response_payload={"error": str(exc), "type": exc.__class__.__name__},
-		)
-		raise frappe.ValidationError(reason) from exc
+	provider = queue_settings.get("provider") or "elevenlabs"
 
-	queue_doc.job_id = (
-		(response.get("callSid") if isinstance(response, dict) else None)
-		or (response.get("call_id") if isinstance(response, dict) else None)
-		or (response.get("sip_call_id") if isinstance(response, dict) else None)
-		or queue_doc.job_id
-	)
-	queue_doc.elevenlabs_conversation_id = (
-		(response.get("conversation_id") if isinstance(response, dict) else None)
-		or queue_doc.elevenlabs_conversation_id
-	)
+	if provider == "livekit":
+		livekit_url = queue_settings.get("livekit_url")
+		livekit_api_key = queue_settings.get("livekit_api_key")
+		# Retrieve decrypted password field for the API Secret
+		call_queue_doc = frappe.get_doc(CALL_QUEUE_DOCTYPE, queue_doc.call_queue)
+		livekit_api_secret = call_queue_doc.get_password("livekit_api_secret") if call_queue_doc.get("livekit_api_secret") else None
 
-	# API FAILURE HANDLING: Catch ElevenLabs submission errors
-	if status_code >= 400 or (isinstance(response, dict) and response.get("status") == "error"):
-		reason = f"ElevenLabs submission failed with status {status_code}"
-		if isinstance(response, dict) and response.get("message"):
-			reason = f"ElevenLabs API Error: {response['message']}"
-			
-		_finalize_submission_failure(
-			queue_doc,
-			reason=reason,
-			policy=policy,
-			request_payload=payload,
-			response_payload=response,
+		if not livekit_url:
+			raise frappe.ValidationError("Missing LiveKit URL in Call Queue config.")
+		if not livekit_api_key:
+			raise frappe.ValidationError("Missing LiveKit API Key in Call Queue config.")
+		if not livekit_api_secret:
+			raise frappe.ValidationError("Missing LiveKit API Secret in Call Queue config.")
+		if not queue_doc.telephony_trunk_id:
+			raise frappe.ValidationError("Missing SIP Trunk ID on the assigned Telephony Account.")
+
+		to_number = normalize_phone_number(
+			(remote_context or {}).get("customer_phone") or queue_doc.customer_phone
 		)
-		return build_queue_response(queue_doc, ok=False, message=reason)
+		if to_number and len(to_number) == 10:
+			to_number = f"91{to_number}"
+		if not to_number:
+			raise frappe.ValidationError(f"Encounter Queue {queue_doc.name} has no callable customer phone")
+
+		call_queue_clean = re.sub(r'[^a-zA-Z0-9_\-]', '', queue_doc.call_queue)
+		encounter_queue_clean = re.sub(r'[^a-zA-Z0-9_\-]', '', queue_doc.name)
+		phone_clean = re.sub(r'[^a-zA-Z0-9_\-]', '', to_number)
+		room_name = f"{call_queue_clean}_{encounter_queue_clean}_{phone_clean}"
+
+		import jwt
+		import calendar
+		import datetime
+
+		now_ts = calendar.timegm(datetime.datetime.now(datetime.timezone.utc).utctimetuple())
+		token_payload = {
+			"iss": livekit_api_key,
+			"sub": "",
+			"nbf": now_ts,
+			"exp": now_ts + 600,
+			"sip": {
+				"admin": True,
+				"call": True
+			}
+		}
+		token = jwt.encode(token_payload, livekit_api_secret, algorithm="HS256")
+		if isinstance(token, bytes):
+			token = token.decode("utf-8")
+
+		dynamic_variables = build_dynamic_variables(queue_doc, remote_context=remote_context)
+		participant_attributes = {k: str(v) for k, v in dynamic_variables.items() if v is not None}
+
+		payload = {
+			"sipTrunkId": queue_doc.telephony_trunk_id,
+			"sipCallTo": to_number,
+			"roomName": room_name,
+			"participantIdentity": f"sip_{to_number}",
+			"participantAttributes": participant_attributes,
+			"playDialtone": True
+		}
+
+		http_host = livekit_url.replace("wss://", "https://").replace("ws://", "http://").rstrip("/")
+		endpoint = f"{http_host}/twirp/livekit.SIP/CreateSIPParticipant"
+
+		try:
+			status_code, response = _post_json(
+				endpoint,
+				payload,
+				headers={
+					"Authorization": f"Bearer {token}",
+					"Content-Type": "application/json"
+				},
+				timeout=timeout
+			)
+		except (TimeoutError, socket.timeout) as exc:
+			_finalize_submission_failure(
+				queue_doc,
+				reason=f"LiveKit request timed out after {timeout}s",
+				policy=policy,
+				request_payload=payload,
+				response_payload={"error": str(exc), "type": exc.__class__.__name__},
+			)
+			raise frappe.ValidationError(f"LiveKit request timed out after {timeout}s") from exc
+		except error.URLError as exc:
+			reason = f"LiveKit network error: {exc.reason}"
+			_finalize_submission_failure(
+				queue_doc,
+				reason=reason,
+				policy=policy,
+				request_payload=payload,
+				response_payload={"error": str(exc), "type": exc.__class__.__name__},
+			)
+			raise frappe.ValidationError(reason) from exc
+
+		queue_doc.job_id = (
+			(response.get("sipCallId") if isinstance(response, dict) else None)
+			or (response.get("participantId") if isinstance(response, dict) else None)
+			or queue_doc.job_id
+		)
+		queue_doc.session_id = (
+			(response.get("roomName") if isinstance(response, dict) else None)
+			or room_name
+		)
+		queue_doc.elevenlabs_conversation_id = (
+			(response.get("participantId") if isinstance(response, dict) else None)
+			or queue_doc.elevenlabs_conversation_id
+		)
+
+		if status_code >= 400 or (isinstance(response, dict) and response.get("status") == "error"):
+			reason = f"LiveKit submission failed with status {status_code}"
+			if isinstance(response, dict) and response.get("message"):
+				reason = f"LiveKit API Error: {response['message']}"
+
+			_finalize_submission_failure(
+				queue_doc,
+				reason=reason,
+				policy=policy,
+				request_payload=payload,
+				response_payload=response,
+			)
+			return build_queue_response(queue_doc, ok=False, message=reason)
+		else:
+			frappe.log_error("LiveKit Success", f"Status {status_code}. Setting {queue_doc.name} to In Progress")
+			queue_doc.telephony_status = "dialing"
+			queue_doc.queue_status = "In Progress"
+			queue_doc.started_at = queue_doc.started_at or now_datetime()
+			queue_doc.last_status_at = now_datetime()
+			append_note(
+				queue_doc,
+				f"Submitted to LiveKit for {payload['sipCallTo']} via queue {queue_settings.get('queue_name') or queue_doc.call_queue}",
+			)
+
 	else:
-		frappe.log_error("ElevenLabs Success", f"Status {status_code}. Setting {queue_doc.name} to In Progress")
-		queue_doc.telephony_status = "dialing"
-		queue_doc.queue_status = "In Progress"
-		queue_doc.started_at = queue_doc.started_at or now_datetime()
-		queue_doc.last_status_at = now_datetime()
-		append_note(
-			queue_doc,
-			f"Submitted to ElevenLabs for {payload['to_number']} via queue {queue_settings.get('queue_name') or queue_doc.call_queue}",
+		api_key = get_elevenlabs_api_key()
+		if not api_key:
+			raise frappe.ValidationError(
+				"Missing ElevenLabs API key. Set voice_ai_elevenlabs_api_key or elevenlabs_api_key in site config."
+			)
+
+		payload = build_elevenlabs_payload(queue_doc, queue_settings, remote_context=remote_context)
+		endpoint = f"{get_elevenlabs_base_url().rstrip('/')}/v1/convai/sip-trunk/outbound-call"
+		try:
+			status_code, response = _post_json(endpoint, payload, headers={"xi-api-key": api_key}, timeout=timeout)
+		except (TimeoutError, socket.timeout) as exc:
+			_finalize_submission_failure(
+				queue_doc,
+				reason=f"ElevenLabs request timed out after {timeout}s",
+				policy=policy,
+				request_payload=payload,
+				response_payload={"error": str(exc), "type": exc.__class__.__name__},
+			)
+			raise frappe.ValidationError(f"ElevenLabs request timed out after {timeout}s") from exc
+		except error.URLError as exc:
+			reason = f"ElevenLabs network error: {exc.reason}"
+			_finalize_submission_failure(
+				queue_doc,
+				reason=reason,
+				policy=policy,
+				request_payload=payload,
+				response_payload={"error": str(exc), "type": exc.__class__.__name__},
+			)
+			raise frappe.ValidationError(reason) from exc
+
+		queue_doc.job_id = (
+			(response.get("callSid") if isinstance(response, dict) else None)
+			or (response.get("call_id") if isinstance(response, dict) else None)
+			or (response.get("sip_call_id") if isinstance(response, dict) else None)
+			or queue_doc.job_id
 		)
+		queue_doc.elevenlabs_conversation_id = (
+			(response.get("conversation_id") if isinstance(response, dict) else None)
+			or queue_doc.elevenlabs_conversation_id
+		)
+
+		if status_code >= 400 or (isinstance(response, dict) and response.get("status") == "error"):
+			reason = f"ElevenLabs submission failed with status {status_code}"
+			if isinstance(response, dict) and response.get("message"):
+				reason = f"ElevenLabs API Error: {response['message']}"
+				
+			_finalize_submission_failure(
+				queue_doc,
+				reason=reason,
+				policy=policy,
+				request_payload=payload,
+				response_payload=response,
+			)
+			return build_queue_response(queue_doc, ok=False, message=reason)
+		else:
+			frappe.log_error("ElevenLabs Success", f"Status {status_code}. Setting {queue_doc.name} to In Progress")
+			queue_doc.telephony_status = "dialing"
+			queue_doc.queue_status = "In Progress"
+			queue_doc.started_at = queue_doc.started_at or now_datetime()
+			queue_doc.last_status_at = now_datetime()
+			append_note(
+				queue_doc,
+				f"Submitted to ElevenLabs for {payload['to_number']} via queue {queue_settings.get('queue_name') or queue_doc.call_queue}",
+			)
 
 	# Atomic save for statuses to prevent overwrites
 	queue_doc.db_set({
@@ -884,7 +1045,7 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 	frappe.db.commit()
 
 	if status_code >= 400:
-		raise frappe.ValidationError(f"ElevenLabs outbound submission failed with status {status_code}: {response}")
+		raise frappe.ValidationError(f"{provider.capitalize()} outbound submission failed with status {status_code}: {response}")
 
 	return {
 		"ok": True,
@@ -894,7 +1055,6 @@ def submit_encounter_queue(queue_name: str, timeout: int | None = None) -> dict:
 		"job_id": queue_doc.job_id,
 		"conversation_id": queue_doc.elevenlabs_conversation_id,
 	}
-
 
 def get_due_queue_items(call_queue: str) -> dict[str, list[str]]:
 	now_value = get_datetime(now_datetime())
@@ -942,57 +1102,27 @@ def get_active_background_queues():
 	except:
 		return ["default", "long", "short"]
 
-def cleanup_stale_in_progress_calls():
-	"""Mark calls stuck in 'In Progress' for > 15 mins as Failed."""
-	timeout_mins = 15
-	stale_threshold = frappe.utils.add_to_date(None, minutes=-timeout_mins)
-	
-	stale_items = frappe.get_all(
-		QUEUE_DOCTYPE,
-		filters={
-			"queue_status": "In Progress",
-			"last_status_at": ["<", stale_threshold]
-		},
-		fields=["name", "assigned_account"]
-	)
-	
-	for item in stale_items:
-		doc = frappe.get_doc(QUEUE_DOCTYPE, item.name)
-		_finalize_submission_failure(
-			doc, 
-			reason=f"Stale call: Stuck in In Progress for > {timeout_mins} minutes"
-		)
-
 def cleanup_stuck_records(call_queue: str):
-	"""Mark records stuck in 'In Progress' for > 15 mins as Failed and release slots"""
+	"""Mark records stuck in 'In Progress' or 'Picked' for > 15 mins as Failed/Retry"""
 	timeout_mins = 15
 	cutoff = add_to_date(now_datetime(), minutes=-timeout_mins)
 	
 	stuck_items = frappe.get_all(QUEUE_DOCTYPE, filters={
 		"call_queue": call_queue,
-		"queue_status": "In Progress",
+		"queue_status": ["in", ["In Progress", "Picked"]],
 		"modified": ["<", cutoff]
 	}, fields=["name", "assigned_account"])
 	
-	if not stuck_items:
-		return
-		
 	for item in stuck_items:
 		try:
 			doc = frappe.get_doc(QUEUE_DOCTYPE, item.name)
-			doc.queue_status = "Failed"
+			# Centralized failure handling respects the Retry Policy
 			doc.telephony_status = "timeout"
-			doc.ended_at = now_datetime()
-			append_note(doc, f"Marked as Failed due to timeout (stuck in Progress > {timeout_mins} mins)")
-			doc.flags.ignore_permissions = True
-			doc.save(ignore_permissions=True)
-			
-			if item.assigned_account:
-				from voice_ai.voice_ai.assignment import refresh_account_active_load
-				refresh_account_active_load(item.assigned_account)
-				
-			frappe.db.commit()
-			frappe.log_error("Queue Cleanup", f"Marked {item.name} as Failed due to 15min timeout")
+			_finalize_submission_failure(
+				doc, 
+				reason=f"Stale call: Stuck in {doc.queue_status} for > {timeout_mins} minutes"
+			)
+			frappe.log_error("Queue Cleanup", f"Processed timeout for {item.name} (was {doc.queue_status})")
 		except Exception:
 			frappe.log_error("Queue Cleanup Failed", frappe.get_traceback())
 
@@ -1063,7 +1193,7 @@ def process_call_queue(call_queue: str) -> dict:
 
 def process_open_call_queues() -> dict:
 	# 1. Cleanup stale calls (timeout protection)
-	cleanup_stale_in_progress_calls()
+	pass
 
 	results = []
 	for row in frappe.get_all(

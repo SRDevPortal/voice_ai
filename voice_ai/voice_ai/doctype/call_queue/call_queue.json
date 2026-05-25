@@ -19,6 +19,9 @@
   "telephony_account",
   "cb_agent_config",
   "default_agent_id",
+  "livekit_url",
+  "livekit_api_key",
+  "livekit_api_secret",
   "sb_scheduling_retries",
   "allowed_calling_from",
   "allowed_calling_till",
@@ -82,7 +85,7 @@
    "fieldname": "provider",
    "fieldtype": "Select",
    "label": "AI Provider",
-   "options": "elevenlabs\ncustom",
+   "options": "elevenlabs\ncustom\nlivekit",
    "default": "elevenlabs"
   },
   {
@@ -192,6 +195,21 @@
    "fieldname": "sb_description",
    "fieldtype": "Section Break",
    "label": "Description"
+  },
+  {
+   "fieldname": "livekit_url",
+   "fieldtype": "Data",
+   "label": "LiveKit URL"
+  },
+  {
+   "fieldname": "livekit_api_key",
+   "fieldtype": "Data",
+   "label": "LiveKit API Key"
+  },
+  {
+   "fieldname": "livekit_api_secret",
+   "fieldtype": "Password",
+   "label": "LiveKit API Secret"
   }
  ],
  "grid_page_length": 50,
