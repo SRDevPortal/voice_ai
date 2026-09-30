@@ -1253,6 +1253,7 @@ def create_encounter_queue(
 	if not call_queue:
 		frappe.throw("No open Call Queue found for Voice AI")
 
+	frappe.get_doc(CALL_QUEUE_DOCTYPE, call_queue).check_permission("read")
 	remote_config = get_call_queue_remote_config(call_queue)
 	context = {}
 	# Removed local validation for cross-site compatibility
@@ -1261,6 +1262,7 @@ def create_encounter_queue(
 	created = not bool(existing_name)
 	reused = bool(existing_name)
 	queue_doc = frappe.get_doc(QUEUE_DOCTYPE, existing_name) if existing_name else frappe.new_doc(QUEUE_DOCTYPE)
+	queue_doc.check_permission("write" if existing_name else "create")
 
 	queue_doc.call_queue = call_queue
 	queue_doc.patient_encounter = patient_encounter
@@ -1291,14 +1293,16 @@ def create_encounter_queue(
 	queue_doc.save(ignore_permissions=True)
 	frappe.db.commit()
 
+	from voice_ai.number_privacy import project_response
 	if submit_now:
-		return submit_encounter_queue(queue_doc.name)
+		return project_response(submit_encounter_queue(queue_doc.name))
 
-	return build_queue_response(queue_doc, created=created, reused=reused)
+	return project_response(build_queue_response(queue_doc, created=created, reused=reused))
 
 
 @frappe.whitelist()
 def process_voice_ai_queues():
+	frappe.only_for("System Manager")
 	return process_open_call_queues()
 
 @frappe.whitelist()
@@ -1308,6 +1312,7 @@ def update_encounter_status(name: str | None = None, **kwargs):
 	Safe for concurrent calls from multiple webhooks (Vobiz & ElevenLabs).
 	Supports 2. Triple-Lock Lookup: TrunkID + Phone + Active Status
 	"""
+	frappe.has_permission(QUEUE_DOCTYPE, "write", throw=True)
 	# DEBUG: Log RAW input
 	frappe.log_error(
 		title="Triple-Lock Raw Input",
@@ -1358,6 +1363,7 @@ def update_encounter_status(name: str | None = None, **kwargs):
 	}
 	
 	queue_doc = frappe.get_doc(QUEUE_DOCTYPE, name)
+	queue_doc.check_permission("write")
 	current_status = queue_doc.queue_status
 	terminal_statuses = {"Completed", "Failed", "Closed", "Retry Scheduled"}
 
@@ -1409,11 +1415,17 @@ def update_encounter_status(name: str | None = None, **kwargs):
 	
 @frappe.whitelist()
 def read_logs():
+	frappe.only_for("System Manager")
+	from voice_ai.number_privacy import require_raw_log_access
+	require_raw_log_access()
 	logs = frappe.get_all("Error Log", fields=["method", "error", "creation"], order_by="creation desc", limit=10)
 	return logs
 
 @frappe.whitelist()
 def analyze_webhook_formats():
+	frappe.only_for("System Manager")
+	from voice_ai.number_privacy import require_raw_log_access
+	require_raw_log_access()
 	logs = frappe.get_all("Error Log", 
 						 filters={"method": "Triple-Lock Raw Input"}, 
 						 fields=["error", "creation"],
